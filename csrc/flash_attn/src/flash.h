@@ -104,6 +104,10 @@ struct Flash_fwd_params : public Qkv_params {
     index_t block_table_batch_stride;
     int page_block_size;
 
+    // Flexi Paged KV cache (list of tensors)
+    void ** __restrict__ k_page_ptrs;
+    void ** __restrict__ v_page_ptrs;
+
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
     // uint32_t p_dropout_in_uint;

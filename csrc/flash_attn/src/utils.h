@@ -332,7 +332,82 @@ int64_t resolve_thread_kv_page_slice_offset(
         + col_offset;
 }
 
+// resolves offset of a slice of a paged kv copy from gmem.
+// assumes that the tensor has already been positioned at the correct head.
+template <typename Kernel_traits>
+__forceinline__ __device__
+typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
+    const int tidx, const int n_block, const int page_block_size, 
+    const int* block_table, const int page_stride, const int row_stride, void ** page_ptrs,
+    std::optional<int> partial_block_size = std::nullopt
+) {
+    constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
+    constexpr int kGmemRowsPerThread = Kernel_traits::kGmemRowsPerThread;
+    constexpr int kGmemElemsPerLoad = Kernel_traits::kGmemElemsPerLoad;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+
+    const int64_t col_offset = tidx % kGmemThreadsPerRow * kGmemElemsPerLoad;
+    int64_t block_row_offset = tidx / kGmemThreadsPerRow * kGmemRowsPerThread;
+
+    if (partial_block_size) {
+        // if we have a partial block, we need to adjust the row offset to avoid
+        // reading of the end end of the block_table
+        // get the offset of the last row in the kBlockN we care about
+        auto final_row_offset = std::max(*partial_block_size - 1, 0);
+        // adjust the row offset to account for each thread loading multiple
+        // rows
+        auto final_thread_row_offset = 
+          ceil_div(final_row_offset, kGmemRowsPerThread) * kGmemRowsPerThread;
+        block_row_offset = std::min(
+            block_row_offset, int64_t(final_thread_row_offset));
+    }
+
+    const int64_t global_row_offset = block_row_offset + n_block * kBlockN;
+    const int64_t page_offset = global_row_offset % page_block_size;
+    const int64_t virtual_page_idx = global_row_offset / page_block_size;
+
+    using Element = typename Kernel_traits::Element;
+    return reinterpret_cast<Element*>(page_ptrs[block_table[virtual_page_idx]]
+        + page_offset * row_stride
+        + col_offset);
+}
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+// resolves offset of a slice of a paged kv copy from gmem.
+// assumes that the tensor has already been positioned at the correct head.
+template <typename Kernel_traits>
+__forceinline__ __device__
+typename Kernel_traits::Element* flexi_resolve_thread_kv_page_start_address(
+    const int tidx, const int n_block, const int page_block_size, 
+    const int* block_table, const int page_stride, const int row_stride, void ** page_ptrs,
+    std::optional<int> partial_block_size = std::nullopt
+) {
+    constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
+    constexpr int kGmemRowsPerThread = Kernel_traits::kGmemRowsPerThread;
+    constexpr int kGmemElemsPerLoad = Kernel_traits::kGmemElemsPerLoad;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+
+    const int64_t col_offset = tidx % kGmemThreadsPerRow * kGmemElemsPerLoad;
+    int64_t block_row_offset = tidx / kGmemThreadsPerRow * kGmemRowsPerThread;
+
+    if (partial_block_size) {
+        // if we have a partial block, we need to adjust the row offset to avoid
+        // reading of the end end of the block_table
+        // get the offset of the last row in the kBlockN we care about
+        auto final_row_offset = std::max(*partial_block_size - 1, 0);
+        // adjust the row offset to account for each thread loading multiple
+        // rows
+        auto final_thread_row_offset = 
+          ceil_div(final_row_offset, kGmemRowsPerThread) * kGmemRowsPerThread;
+        block_row_offset = std::min(
+            block_row_offset, int64_t(final_thread_row_offset));
+    }
+
+    const int64_t global_row_offset = block_row_offset + n_block * kBlockN;
+    const int64_t virtual_page_idx = global_row_offset / page_block_size;
+
+    using Element = typename Kernel_traits::Element;
+    return reinterpret_cast<Element *>(page_ptrs[block_table[virtual_page_idx]]);
+}
 
 // Layout reshape function. Given a layout with modes ((v1, v2), m, k), returns (v1, v2, k),         
 // where v2 may be a tuple itself, in the case of swizzled smem-backed thread tiles. This ensures

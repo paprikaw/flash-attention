@@ -24,12 +24,12 @@ struct BlockInfo {
         , actual_seqlen_k(params.seqused_k ? params.seqused_k[bidb] - leftpad_k : seqlen_k_cache + (params.knew_ptr == nullptr ? 0 : params.seqlen_knew))
         {
         }
-
+    // 注意在这里我们是使用变长序列的方式来计算offset，因此对于q的定位需要使用到q的cumulative sequence length
     template <typename index_t>
     __forceinline__ __device__ index_t q_offset(const index_t batch_stride, const index_t row_stride, const int bidb) const {
         return sum_s_q == -1 ? bidb * batch_stride : uint32_t(sum_s_q) * row_stride;
     }
-
+    // TODO: 为什么要使用leftpad_k?，为什么q没有leftpad?
     template <typename index_t>
     __forceinline__ __device__ index_t k_offset(const index_t batch_stride, const index_t row_stride, const int bidb) const {
         return sum_s_k == -1 ? bidb * batch_stride + leftpad_k * row_stride : uint32_t(sum_s_k + leftpad_k) * row_stride;

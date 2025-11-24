@@ -1,8 +1,22 @@
 cmake_minimum_required(VERSION 3.26)
 
 project(vllm_flash_attn LANGUAGES CXX CUDA)
+
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Temporarily suppress compiler warnings (user request)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-w)
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    add_compile_options(/W0)
+endif ()
 
 set(FA2_ENABLED ON)
 set(FA3_ENABLED ON)
