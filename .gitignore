@@ -34,3 +34,4 @@ venv
 .cache/
 .clangd
 
+uv_build.log

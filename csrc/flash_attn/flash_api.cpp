@@ -4,6 +4,7 @@
 
 // Include these 2 headers instead of torch/extension.h since we don't need all of the torch headers.
 #include <algorithm>
+#include <c10/util/Exception.h>
 #include <torch/nn/functional.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
@@ -224,6 +225,12 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
     cudaMemcpy(v_ptrs_dev, v_ptrs_host.data(),
                v_list.size() * sizeof(void*),
                cudaMemcpyHostToDevice);
+    
+    printf("DEBUG: set_params_flexi_fprop: k_ptrs_dev=%p, v_ptrs_dev=%p\n", k_ptrs_dev, v_ptrs_dev);
+    if (k_list.size() > 0) {
+        printf("DEBUG: set_params_flexi_fprop: k_list[0].data_ptr()=%p\n", k_list[0].data_ptr());
+    }
+
     // Allocate device memory for the pointers
     // Set the pointers and strides.
     params.q_ptr = q.data_ptr();
@@ -241,6 +248,8 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
     params.o_ptr = out.data_ptr();
     params.o_row_stride = out.stride(-3);
     params.o_head_stride = out.stride(-2);
+    params.is_bf16 = q.dtype() == torch::kBFloat16;
+
 
     assert(cu_seqlens_q_d != nullptr);
 
@@ -419,7 +428,8 @@ void run_flexi_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-                assert (params.num_splits > 0);  // flexi must use split-kv
+                TORCH_CHECK(params.num_splits > 0 || force_split_kernel, "flexi must use split-kv");
+                printf("DEBUG: run_flexi_mha_fwd: headdim=%d, is_causal=%d, num_splits=%d\n", kHeadDim, Is_causal, params.num_splits);
                 run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
             });
         });
@@ -1833,6 +1843,9 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     }
 
     Flash_fwd_params params;
+    printf("DEBUG: flexi_mha_varlen_fwd: batch_size=%d, num_heads=%d, head_size=%d, num_heads_k=%d, max_seqlen_q=%d, max_seqlen_k=%d\n",
+           batch_size, num_heads, head_size, num_heads_k, max_seqlen_q, max_seqlen_k);
+    printf("DEBUG: flexi_mha_varlen_fwd: k_list.size()=%lu, v_list.size()=%lu\n", k_list.size(), v_list.size());
     set_params_flexi_fprop(params,
                      batch_size,
                      max_seqlen_q, max_seqlen_k,
@@ -1864,11 +1877,14 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
     if (seqlenq_ngroups_swapped) {
+        printf("DEBUG: flexi_mha_varlen_fwd: using split-k for decoding optimization\n");
         // Only apply split-k for decoding
         std::tie(softmax_lse_accum, out_accum) =
             set_params_splitkv(params, batch_size, num_heads, head_size,
                                max_seqlen_k, max_seqlen_q, head_size_rounded,
                                p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
+    } else {
+        printf("DEBUG: flexi_mha_varlen_fwd: not using split-k for decoding optimization\n");
     }
 
     if (leftpad_k_.has_value()) {

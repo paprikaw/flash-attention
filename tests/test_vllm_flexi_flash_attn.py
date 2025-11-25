@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 from vllm_flash_attn.flash_attn_interface import (
     flexi_flash_attn_varlen_func,
+    flash_attn_varlen_func,
     is_fa_version_supported,
 )
 
@@ -22,12 +23,12 @@ NUM_HEADS = [(4, 4)]
 HEAD_SIZES = [128]
 # BLOCK_SIZES = [16, 32]
 BLOCK_SIZES = [16]
-DTYPES = [torch.float16]
+DTYPES = [torch.bfloat16]
 # DTYPES = [torch.float16, torch.bfloat16]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
-# NUM_BLOCKS = [32768, 2048]
-NUM_BLOCKS = [2048]
+NUM_BLOCKS = [32768]
+# NUM_BLOCKS = [2048]
 
 # Check FA version support with better error reporting
 VERSIONS = []
@@ -114,7 +115,47 @@ def test_flexi_flash_attn_kv_split(
     # k_pages[i] corresponds to the i-th block in the original tensor
     k_pages = [key_cache[i] for i in range(num_blocks)]
     v_pages = [value_cache[i] for i in range(num_blocks)]
-    output = flexi_flash_attn_varlen_func(
+
+    # Warmup
+    for _ in range(3):
+        flexi_flash_attn_varlen_func(
+            q=query,
+            k=k_pages,
+            v=v_pages,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=seqused_k,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=window_size,
+            block_table=block_tables,
+            softcap=soft_cap if soft_cap is not None else 0,
+            scheduler_metadata=scheduler_metadata,
+            fa_version=fa_version
+        )
+        flash_attn_varlen_func(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=seqused_k,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=max_kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=window_size,
+            block_table=block_tables,
+            softcap=soft_cap if soft_cap is not None else 0,
+            scheduler_metadata=scheduler_metadata,
+            fa_version=fa_version
+        )
+
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    start_event.record()
+    output1 = flexi_flash_attn_varlen_func(
         q=query,
         k=k_pages,
         v=v_pages,
@@ -130,6 +171,34 @@ def test_flexi_flash_attn_kv_split(
         scheduler_metadata=scheduler_metadata,
         fa_version=fa_version
     )
+    end_event.record()
+    end_event.synchronize()
+    flexi_time = start_event.elapsed_time(end_event)
+
+    start_event.record()
+    output2 = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=seqused_k,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len,
+        softmax_scale=scale,
+        causal=True,
+        window_size=window_size,
+        block_table=block_tables,
+        softcap=soft_cap if soft_cap is not None else 0,
+        scheduler_metadata=scheduler_metadata,
+        fa_version=fa_version
+    )
+    end_event.record()
+    end_event.synchronize()
+    flash_time = start_event.elapsed_time(end_event)
+
+    print(f"\nFlexi time: {flexi_time:.3f} ms")
+    print(f"Flash time: {flash_time:.3f} ms")
+    print(f"Speedup: {flash_time / flexi_time:.2f}x")
 
     ref_output = ref_paged_attn(
         query=query,
@@ -142,5 +211,6 @@ def test_flexi_flash_attn_kv_split(
         sliding_window=sliding_window,
         soft_cap=soft_cap,
     )
-    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2), \
-        f"{torch.max(torch.abs(output - ref_output))}"
+
+    torch.testing.assert_close(output1, ref_output, atol=2e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(output1 - ref_output))}"

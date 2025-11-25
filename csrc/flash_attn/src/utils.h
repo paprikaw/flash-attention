@@ -367,9 +367,9 @@ typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
     const int64_t virtual_page_idx = global_row_offset / page_block_size;
 
     using Element = typename Kernel_traits::Element;
-    return reinterpret_cast<Element*>(page_ptrs[block_table[virtual_page_idx]]
+    return reinterpret_cast<Element*>(page_ptrs[block_table[virtual_page_idx]])
         + page_offset * row_stride
-        + col_offset);
+        + col_offset;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // resolves offset of a slice of a paged kv copy from gmem.

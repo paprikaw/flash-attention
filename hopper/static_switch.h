@@ -171,6 +171,13 @@
   #define VCOLMAJOR_SWITCH BOOL_SWITCH
 #endif
 
+#ifdef FLASHATTENTION_ONLY_HEAD_DIM
+  #define HEADDIM_SWITCH(HEADDIM, ...)                                                             \
+  [&] {                                                                                          \
+    constexpr static int kHeadSize = FLASHATTENTION_ONLY_HEAD_DIM;                               \
+    return __VA_ARGS__();                                                                      \
+  }()
+#else
 #define HEADDIM_SWITCH(HEADDIM, ...)                                                             \
   [&] {                                                                                          \
     if (HEADDIM == 64) {                                                                         \
@@ -190,3 +197,4 @@
       return __VA_ARGS__();                                                                      \
     }                                                                                            \
   }()
+#endif

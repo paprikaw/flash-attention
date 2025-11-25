@@ -170,7 +170,7 @@ class cmake_build_ext(build_ext):
         # Pass the python path to cmake so it can reuse the build dependencies
         # on subsequent calls to python.
         cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
-
+        self.build_temp = os.path.abspath('./build')
         #
         # Setup parallelism and build tool
         #
@@ -283,7 +283,8 @@ def get_version() -> str:
 
 
 ext_modules.append(CMakeExtension(name="vllm_flash_attn._vllm_fa2_C"))
-ext_modules.append(CMakeExtension(name="vllm_flash_attn._vllm_fa3_C"))
+if not os.getenv("FLASH_ATTN_DISABLE_FA3"):
+    ext_modules.append(CMakeExtension(name="vllm_flash_attn._vllm_fa3_C"))
 
 setup(
     name="vllm-flash-attn",
