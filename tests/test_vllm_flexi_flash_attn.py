@@ -8,6 +8,8 @@ from vllm_flash_attn.flash_attn_interface import (
     flexi_flash_attn_varlen_func,
     flash_attn_varlen_func,
     is_fa_version_supported,
+    prepare_flexi_kv_ptrs,
+    free_flexi_kv_ptrs
 )
 
 # 使用绝对导入而不是相对导入
@@ -121,7 +123,8 @@ def test_flexi_flash_attn_kv_split(
     for v_tensor in value_cache:
         copied_tensor = v_tensor.clone()
         v_pages.append(copied_tensor)
-    print(f"block_tables 1: {block_tables}")
+    print(f"block_tables 1: {block_tables}");
+    k_ptrs, v_ptrs = prepare_flexi_kv_ptrs(k_pages, v_pages);
     # Warmup
     for _ in range(3):
         flexi_flash_attn_varlen_func(
@@ -138,7 +141,9 @@ def test_flexi_flash_attn_kv_split(
             block_table=block_tables,
             softcap=soft_cap if soft_cap is not None else 0,
             scheduler_metadata=scheduler_metadata,
-            fa_version=fa_version
+            fa_version=fa_version,
+            cached_k_ptrs=k_ptrs,
+            cached_v_ptrs=v_ptrs
         )
         flash_attn_varlen_func(
             q=query,
@@ -157,27 +162,27 @@ def test_flexi_flash_attn_kv_split(
             fa_version=fa_version
         )
 
-
+    free_flexi_kv_ptrs(k_ptrs, v_ptrs)
     block_tables2 = torch.randint(0,
                                  num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32) 
-    print(f"block_tables 2: {block_tables2}")
-    key_cache = torch.randn(num_blocks,
-                        block_size,
-                        num_kv_heads,
-                        head_size,
-                        dtype=dtype)
-    value_cache = torch.randn_like(key_cache)
-    k_pages = []
-    v_pages = []
-    for k_tensor in key_cache:
-        copied_tensor = k_tensor.clone()
-        k_pages.append(copied_tensor)
-    for v_tensor in value_cache:
-        copied_tensor = v_tensor.clone()
-        v_pages.append(copied_tensor)
-
+    print(f"start to perform formal test")
+    # key_cache = torch.randn(num_blocks,
+    #                     block_size,
+    #                     num_kv_heads,
+    #                     head_size,
+    #                     dtype=dtype)
+    # value_cache = torch.randn_like(key_cache)
+    # k_pages = []
+    # v_pages = []
+    # for k_tensor in key_cache:
+    #     copied_tensor = k_tensor.clone()
+    #     k_pages.append(copied_tensor)
+    # for v_tensor in value_cache:
+    #     copied_tensor = v_tensor.clone()
+    #     v_pages.append(copied_tensor)
+    k_ptrs, v_ptrs = prepare_flexi_kv_ptrs(k_pages, v_pages);
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
@@ -196,7 +201,9 @@ def test_flexi_flash_attn_kv_split(
         block_table=block_tables2,
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=scheduler_metadata,
-        fa_version=fa_version
+        fa_version=fa_version,
+        cached_k_ptrs=k_ptrs,
+        cached_v_ptrs=v_ptrs
     )
     end_event.record()
     end_event.synchronize()

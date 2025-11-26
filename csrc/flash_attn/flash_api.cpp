@@ -174,8 +174,8 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
                       const size_t d_rounded,
                       // device pointers
                       const at::Tensor q,
-                      const std::vector<at::Tensor>& k_list,
-                      const std::vector<at::Tensor>& v_list,
+                      const at::Tensor k_meta,
+                      const at::Tensor v_meta,
                       at::Tensor out,
                       void *cu_seqlens_q_d,
                       void *cu_seqlens_k_d,
@@ -187,45 +187,48 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
                       int window_size_left,
                       int window_size_right,
                       const float softcap,
+                      void** k_ptrs_dev_cached,
+                      void** v_ptrs_dev_cached,
                       bool seqlenq_ngroups_swapped=false,
-                      const bool unpadded_lse=false) {
+                      const bool unpadded_lse=false
+                      ) {
 
     // Reset the parameters
     params = {};
     
-    // ----------------------------
-    // Construct host pointer array
-    // ----------------------------
-    std::vector<void*> k_ptrs_host;
-    std::vector<void*> v_ptrs_host;
+    // // ----------------------------
+    // // Construct host pointer array
+    // // ----------------------------
+    // std::vector<void*> k_ptrs_host;
+    // std::vector<void*> v_ptrs_host;
 
-    k_ptrs_host.reserve(k_list.size());
-    v_ptrs_host.reserve(v_list.size());
+    // k_ptrs_host.reserve(k_list.size());
+    // v_ptrs_host.reserve(v_list.size());
                         
-    for (const auto& t : k_list) {
-        TORCH_CHECK(t.is_cuda(), "k_list contains CPU tensor!");
-        k_ptrs_host.push_back(t.data_ptr());
-    }
+    // for (const auto& t : k_list) {
+    //     TORCH_CHECK(t.is_cuda(), "k_list contains CPU tensor!");
+    //     k_ptrs_host.push_back(t.data_ptr());
+    // }
 
-    for (const auto& t : v_list) {
-        TORCH_CHECK(t.is_cuda(), "v_list contains CPU tensor!");
-        v_ptrs_host.push_back(t.data_ptr());
-    }
+    // for (const auto& t : v_list) {
+    //     TORCH_CHECK(t.is_cuda(), "v_list contains CPU tensor!");
+    //     v_ptrs_host.push_back(t.data_ptr());
+    // }
     
-    // ----------------------------
-    // Allocate device pointer table
-    // ----------------------------
-    void** k_ptrs_dev;
-    cudaMalloc(&k_ptrs_dev, k_list.size() * sizeof(void*));
-    cudaMemcpy(k_ptrs_dev, k_ptrs_host.data(),
-               k_list.size() * sizeof(void*),
-               cudaMemcpyHostToDevice);
+    // // ----------------------------
+    // // Allocate device pointer table
+    // // ----------------------------
+    // void** k_ptrs_dev;
+    // cudaMalloc(&k_ptrs_dev, k_list.size() * sizeof(void*));
+    // cudaMemcpy(k_ptrs_dev, k_ptrs_host.data(),
+    //            k_list.size() * sizeof(void*),
+    //            cudaMemcpyHostToDevice);
     
-    void** v_ptrs_dev;
-    cudaMalloc(&v_ptrs_dev, v_list.size() * sizeof(void*));
-    cudaMemcpy(v_ptrs_dev, v_ptrs_host.data(),
-               v_list.size() * sizeof(void*),
-               cudaMemcpyHostToDevice);
+    // void** v_ptrs_dev;
+    // cudaMalloc(&v_ptrs_dev, v_list.size() * sizeof(void*));
+    // cudaMemcpy(v_ptrs_dev, v_ptrs_host.data(),
+    //            v_list.size() * sizeof(void*),
+    //            cudaMemcpyHostToDevice);
     
     // printf("DEBUG: set_params_flexi_fprop: k_ptrs_dev=%p, v_ptrs_dev=%p\n", k_ptrs_dev, v_ptrs_dev);
     // if (k_list.size() > 0) {
@@ -235,17 +238,17 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
     // Allocate device memory for the pointers
     // Set the pointers and strides.
     params.q_ptr = q.data_ptr();
-    params.k_ptr = k_ptrs_dev;
-    params.v_ptr = v_ptrs_dev;
-    params.k_page_ptrs = k_ptrs_dev;
-    params.v_page_ptrs = v_ptrs_dev;
+    params.k_ptr = k_ptrs_dev_cached;
+    params.v_ptr = v_ptrs_dev_cached;
+    params.k_page_ptrs = k_ptrs_dev_cached;
+    params.v_page_ptrs = v_ptrs_dev_cached;
     // All stride are in elements, not bytes.
     params.q_row_stride = q.stride(-3);
-    params.k_row_stride = k_list[0].stride(-3);
-    params.v_row_stride = v_list[0].stride(-3);
+    params.k_row_stride = k_meta.stride(-3);
+    params.v_row_stride = v_meta.stride(-3);
     params.q_head_stride = q.stride(-2);
-    params.k_head_stride = k_list[0].stride(-2);
-    params.v_head_stride = v_list[0].stride(-2);
+    params.k_head_stride = k_meta.stride(-2);
+    params.v_head_stride = v_meta.stride(-2);
     params.o_ptr = out.data_ptr();
     params.o_row_stride = out.stride(-3);
     params.o_head_stride = out.stride(-2);
@@ -327,6 +330,64 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
 
     params.unpadded_lse = unpadded_lse;
     params.seqlenq_ngroups_swapped = seqlenq_ngroups_swapped;
+}
+
+// Prepare and cache KV pointers on GPU for flexi attention
+std::tuple<int64_t, int64_t> prepare_flexi_kv_ptrs(
+    const std::vector<at::Tensor>& k_list,
+    const std::vector<at::Tensor>& v_list
+) {
+    TORCH_CHECK(!k_list.empty(), "k_list cannot be empty");
+    TORCH_CHECK(!v_list.empty(), "v_list cannot be empty");
+    TORCH_CHECK(k_list.size() == v_list.size(), "k_list and v_list must have same size");
+    
+    // Construct host pointer arrays
+    std::vector<void*> k_ptrs_host;
+    std::vector<void*> v_ptrs_host;
+    
+    k_ptrs_host.reserve(k_list.size());
+    v_ptrs_host.reserve(v_list.size());
+    
+    for (const auto& t : k_list) {
+        TORCH_CHECK(t.is_cuda(), "k_list contains CPU tensor!");
+        k_ptrs_host.push_back(t.data_ptr());
+    }
+    
+    for (const auto& t : v_list) {
+        TORCH_CHECK(t.is_cuda(), "v_list contains CPU tensor!");
+        v_ptrs_host.push_back(t.data_ptr());
+    }
+    
+    // Allocate device memory for pointer arrays
+    void** k_ptrs_dev;
+    void** v_ptrs_dev;
+    
+    cudaMalloc(&k_ptrs_dev, k_list.size() * sizeof(void*));
+    cudaMemcpy(k_ptrs_dev, k_ptrs_host.data(),
+               k_list.size() * sizeof(void*),
+               cudaMemcpyHostToDevice);
+    
+    cudaMalloc(&v_ptrs_dev, v_list.size() * sizeof(void*));
+    cudaMemcpy(v_ptrs_dev, v_ptrs_host.data(),
+               v_list.size() * sizeof(void*),
+               cudaMemcpyHostToDevice);
+    
+    printf("DEBUG: Cached GPU pointers - k_ptrs_dev=%p, v_ptrs_dev=%p\n", k_ptrs_dev, v_ptrs_dev);
+    
+    // Return as int64 to be Python-compatible
+    return std::make_tuple(reinterpret_cast<int64_t>(k_ptrs_dev), 
+                          reinterpret_cast<int64_t>(v_ptrs_dev));
+}
+
+// Free cached KV pointers
+void free_flexi_kv_ptrs(int64_t k_ptrs_dev, int64_t v_ptrs_dev) {
+    if (k_ptrs_dev != 0) {
+        cudaFree(reinterpret_cast<void**>(k_ptrs_dev));
+    }
+    if (v_ptrs_dev != 0) {
+        cudaFree(reinterpret_cast<void**>(v_ptrs_dev));
+    }
+    printf("DEBUG: Freed cached GPU pointers\n");
 }
 
 void set_params_dgrad(Flash_bwd_params &params,
@@ -879,7 +940,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      /*unpadded_lse*/true);
     cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
-    printf("[BENCHMARK] After params time: %.3f ms\n", 
+    printf("[Normal BENCHMARK] After params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
     params.total_q = total_q;
 
@@ -1706,8 +1767,9 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
 std::vector<at::Tensor>
 flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
-               const std::vector<at::Tensor> &k_list,  // list of tensors to be concatenated along dim0
-               const std::vector<at::Tensor> &v_list,  // list of tensors to be concatenated along dim0
+               const at::Tensor &k_meta,  // representative tensor for shape/stride
+               const at::Tensor &v_meta,  // representative tensor for shape/stride
+               const int64_t num_blocks,  // number of pages
                std::optional<at::Tensor> &out_, // total_q x num_heads x head_size, total_k := \sum_{i=0}^{b} s_i
                const at::Tensor &cu_seqlens_q,  // b+1
                const at::Tensor &cu_seqlens_k,  // b+1
@@ -1725,7 +1787,9 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                int window_size_right,
                const float softcap,
                const bool return_softmax,
-               std::optional<at::Generator> gen_) {
+               std::optional<at::Generator> gen_,
+               int64_t cached_k_ptrs,
+               int64_t cached_v_ptrs) {
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
@@ -1739,12 +1803,12 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     auto q_dtype = q.dtype();
     TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16,
                 "FlashAttention only support fp16 and bf16 data type");
-    TORCH_CHECK(k_list[0].dtype() == q_dtype, "query and key must have the same dtype");
-    TORCH_CHECK(v_list[0].dtype() == q_dtype, "query and value must have the same dtype");
+    TORCH_CHECK(k_meta.dtype() == q_dtype, "query and key must have the same dtype");
+    TORCH_CHECK(v_meta.dtype() == q_dtype, "query and value must have the same dtype");
     TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
     TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype int32");
 
-    CHECK_DEVICE(q); CHECK_DEVICE(k_list[0]); CHECK_DEVICE(v_list[0]);
+    CHECK_DEVICE(q); CHECK_DEVICE(k_meta); CHECK_DEVICE(v_meta);
     CHECK_DEVICE(cu_seqlens_q);
     CHECK_DEVICE(cu_seqlens_k);
 
@@ -1757,8 +1821,8 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     TORCH_CHECK(block_table.stride(-1) == 1, "block_table must have contiguous last dimension");
 
     TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
-    TORCH_CHECK(k_list[0].stride(-1) == 1, "Input tensor must have contiguous last dimension");
-    TORCH_CHECK(v_list[0].stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(k_meta.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(v_meta.stride(-1) == 1, "Input tensor must have contiguous last dimension");
     CHECK_CONTIGUOUS(cu_seqlens_q);
     CHECK_CONTIGUOUS(cu_seqlens_k);
 
@@ -1767,13 +1831,13 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     const int batch_size = cu_seqlens_q.numel() - 1;
     int num_heads = sizes[1];
     const int head_size = sizes[2];
-    const int num_heads_k = k_list[0].size(1);
+    const int num_heads_k = k_meta.size(1);
 
     if (softcap > 0.f) { TORCH_CHECK(p_dropout == 0.f, "Softcapping does not support dropout for now"); }
 
     const int max_num_blocks_per_seq = block_table.size(1);
-    const int num_blocks = k_list.size();
-    const int page_block_size = k_list[0].size(0);
+    const int page_block_size = k_meta.size(0);
+    TORCH_CHECK(num_blocks > 0, "num_blocks must be positive");
     TORCH_CHECK(!paged_KV || page_block_size % 16 == 0, "Paged KV cache block size must be divisible by 16");
 
     if (max_seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }  // causal=true is the same as causal=false in this case
@@ -1804,20 +1868,8 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
 
     CHECK_SHAPE(q, total_q, num_heads, head_size);
 
-    // Only check first and last tensor to avoid O(n) overhead with large lists
-    if (!k_list.empty()) {
-        CHECK_SHAPE(k_list[0], page_block_size, num_heads_k, head_size);
-        if (k_list.size() > 1) {
-            CHECK_SHAPE(k_list[k_list.size() - 1], page_block_size, num_heads_k, head_size);
-        }
-    }
-
-    if (!v_list.empty()) {
-        CHECK_SHAPE(v_list[0], page_block_size, num_heads_k, head_size);
-        if (v_list.size() > 1) {
-            CHECK_SHAPE(v_list[v_list.size() - 1], page_block_size, num_heads_k, head_size);
-        }
-    }
+    CHECK_SHAPE(k_meta, page_block_size, num_heads_k, head_size);
+    CHECK_SHAPE(v_meta, page_block_size, num_heads_k, head_size);
     CHECK_SHAPE(block_table, batch_size, max_num_blocks_per_seq);
 
     CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
@@ -1878,13 +1930,22 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     // printf("DEBUG: flexi_mha_varlen_fwd: batch_size=%d, num_heads=%d, head_size=%d, num_heads_k=%d, max_seqlen_q=%d, max_seqlen_k=%d\n",
         //    batch_size, num_heads, head_size, num_heads_k, max_seqlen_q, max_seqlen_k);
     // printf("DEBUG: flexi_mha_varlen_fwd: k_list.size()=%lu, v_list.size()=%lu\n", k_list.size(), v_list.size());
+    
+    void** k_ptrs_dev_ptr = cached_k_ptrs != 0 ? reinterpret_cast<void**>(cached_k_ptrs) : nullptr;
+    void** v_ptrs_dev_ptr = cached_v_ptrs != 0 ? reinterpret_cast<void**>(cached_v_ptrs) : nullptr;
+    TORCH_CHECK(k_ptrs_dev_ptr != nullptr)
+    TORCH_CHECK(v_ptrs_dev_ptr != nullptr)
+    
     set_params_flexi_fprop(params,
                      batch_size,
                      max_seqlen_q, max_seqlen_k,
                      seqlen_q_rounded, seqlen_k_rounded,
                      num_heads, num_heads_k,
                      head_size, head_size_rounded,
-                     q, k_list, v_list, out,
+                     q, 
+                     k_meta, 
+                     v_meta, 
+                     out,
                      cu_seqlens_q_d,
                      cu_seqlens_k.data_ptr(),
                      seqused_k.has_value() ? seqused_k.value().data_ptr() : nullptr,
@@ -1895,8 +1956,11 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                      window_size_left,
                      window_size_right,
                      softcap,
+                    k_ptrs_dev_ptr,
+                     v_ptrs_dev_ptr,
                      seqlenq_ngroups_swapped,
-                     /*unpadded_lse*/true);
+                     /*unpadded_lse*/true
+                     );
     cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] After params time: %.3f ms\n", 
@@ -1906,8 +1970,8 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();
         params.block_table_batch_stride = block_table.stride(0);
-        params.k_batch_stride = k_list[0].stride(0);
-        params.v_batch_stride = v_list[0].stride(0);
+        params.k_batch_stride = k_meta.stride(0);
+        params.v_batch_stride = v_meta.stride(0);
     }
     params.page_block_size = page_block_size;
     // Keep references to these tensors to extend their lifetime
@@ -1998,18 +2062,3 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     return {out, softmax_lse};
 }
 } // namespace FLASH_NAMESPACE
-
-#ifndef FLASHATTENTION_DISABLE_PYBIND
-
-#include <torch/python.h>
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "FlashAttention";
-    m.def("fwd", &FLASH_NAMESPACE::mha_fwd, "Forward pass");
-    m.def("varlen_fwd", &FLASH_NAMESPACE::mha_varlen_fwd, "Forward pass (variable length)");
-    m.def("bwd", &FLASH_NAMESPACE::mha_bwd, "Backward pass");
-    m.def("varlen_bwd", &FLASH_NAMESPACE::mha_varlen_bwd, "Backward pass (variable length)");
-    m.def("fwd_kvcache", &FLASH_NAMESPACE::mha_fwd_kvcache, "Forward pass, with KV-cache");
-}
-
-#endif

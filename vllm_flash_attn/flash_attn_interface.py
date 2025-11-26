@@ -204,7 +204,7 @@ def flash_attn_varlen_func(
         "cu_seqlens_k and seqused_k cannot be provided at the same time"
     assert block_table is None or seqused_k is not None, \
         "seqused_k must be provided if block_table is provided"
-    
+
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
@@ -308,6 +308,9 @@ def flexi_flash_attn_varlen_func(
     v_descale=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
+    # Cached pointers for performance
+    cached_k_ptrs: int = 0,
+    cached_v_ptrs: int = 0,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -378,6 +381,10 @@ def flexi_flash_attn_varlen_func(
         assert len(window_size) == 2
         real_window_size = (window_size[0], window_size[1])
     q = maybe_contiguous(q)
+    # Use a single representative page tensor to carry stride/shape metadata.
+    k_meta = maybe_contiguous(k[0])
+    v_meta = maybe_contiguous(v[0])
+    num_blocks = len(k)
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
     assert fa_version == 2 
     if scheduler_metadata is not None and q_descale is not None \
@@ -387,7 +394,10 @@ def flexi_flash_attn_varlen_func(
                 "k_descale, v_descale"
             )
     out, softmax_lse = torch.ops._vllm_fa2_C.flexi_varlen_fwd(
-        q, k, v,
+        q,
+        k_meta,
+        v_meta,
+        num_blocks,
         out,
         cu_seqlens_q,
         # cu_seqlens_k not used since we use seqused_k, but flash_api.cpp 
@@ -408,6 +418,8 @@ def flexi_flash_attn_varlen_func(
         softcap,
         return_softmax_lse and dropout_p > 0,
         None,
+        cached_k_ptrs,
+        cached_v_ptrs,
     )
     return (out, softmax_lse) if return_softmax_lse else out
 
@@ -763,3 +775,29 @@ def sparse_attn_varlen_func(
         None,
     )
     return (out, softmax_lse) if return_softmax_lse else out
+
+
+# Helper functions for caching KV pointers
+def prepare_flexi_kv_ptrs(k_list: List[torch.Tensor], v_list: List[torch.Tensor]) -> Tuple[int, int]:
+    """
+    Prepare and cache KV pointers on GPU for flexi attention.
+    
+    Args:
+        k_list: List of key tensors
+        v_list: List of value tensors
+    
+    Returns:
+        Tuple of (k_ptrs_cached, v_ptrs_cached) as int values
+    """
+    return torch.ops._vllm_fa2_C.prepare_flexi_kv_ptrs(k_list, v_list)
+
+
+def free_flexi_kv_ptrs(k_ptrs: int, v_ptrs: int):
+    """
+    Free cached KV pointers.
+    
+    Args:
+        k_ptrs: Cached K pointers (int)
+        v_ptrs: Cached V pointers (int)
+    """
+    torch.ops._vllm_fa2_C.free_flexi_kv_ptrs(k_ptrs, v_ptrs)
