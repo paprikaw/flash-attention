@@ -113,9 +113,15 @@ def test_flexi_flash_attn_kv_split(
     # 3. Prepare "Split" Data (List of Tensors)
     # We split the large tensor into a list of smaller tensors (pages)
     # k_pages[i] corresponds to the i-th block in the original tensor
-    k_pages = [key_cache[i] for i in range(num_blocks)]
-    v_pages = [value_cache[i] for i in range(num_blocks)]
-
+    k_pages = []
+    v_pages = []
+    for k_tensor in key_cache:
+        copied_tensor = k_tensor.clone()
+        k_pages.append(copied_tensor)
+    for v_tensor in value_cache:
+        copied_tensor = v_tensor.clone()
+        v_pages.append(copied_tensor)
+    print(f"block_tables 1: {block_tables}")
     # Warmup
     for _ in range(3):
         flexi_flash_attn_varlen_func(
@@ -151,6 +157,27 @@ def test_flexi_flash_attn_kv_split(
             fa_version=fa_version
         )
 
+
+    block_tables2 = torch.randint(0,
+                                 num_blocks,
+                                 (num_seqs, max_num_blocks_per_seq),
+                                 dtype=torch.int32) 
+    print(f"block_tables 2: {block_tables2}")
+    key_cache = torch.randn(num_blocks,
+                        block_size,
+                        num_kv_heads,
+                        head_size,
+                        dtype=dtype)
+    value_cache = torch.randn_like(key_cache)
+    k_pages = []
+    v_pages = []
+    for k_tensor in key_cache:
+        copied_tensor = k_tensor.clone()
+        k_pages.append(copied_tensor)
+    for v_tensor in value_cache:
+        copied_tensor = v_tensor.clone()
+        v_pages.append(copied_tensor)
+
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
@@ -166,7 +193,7 @@ def test_flexi_flash_attn_kv_split(
         softmax_scale=scale,
         causal=True,
         window_size=window_size,
-        block_table=block_tables,
+        block_table=block_tables2,
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=scheduler_metadata,
         fa_version=fa_version
@@ -187,7 +214,7 @@ def test_flexi_flash_attn_kv_split(
         softmax_scale=scale,
         causal=True,
         window_size=window_size,
-        block_table=block_tables,
+        block_table=block_tables2,
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=scheduler_metadata,
         fa_version=fa_version
@@ -206,7 +233,7 @@ def test_flexi_flash_attn_kv_split(
         value_cache=value_cache,
         query_lens=query_lens,
         kv_lens=kv_lens,
-        block_tables=block_tables,
+        block_tables=block_tables2,
         scale=scale,
         sliding_window=sliding_window,
         soft_cap=soft_cap,
