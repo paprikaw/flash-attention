@@ -3,6 +3,7 @@
  ******************************************************************************/
 
 // Include these 2 headers instead of torch/extension.h since we don't need all of the torch headers.
+#include <ATen/core/TensorBody.h>
 #include <algorithm>
 #include <chrono>
 #include <c10/util/Exception.h>
@@ -56,6 +57,8 @@ void set_params_fprop(Flash_fwd_params &params,
 
     // Reset the parameters
     params = {};
+    params.debug_timing = nullptr;
+    params.debug_timing = nullptr;
 
     params.is_bf16 = q.dtype() == torch::kBFloat16;
 
@@ -914,6 +917,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         softmax_lse.fill_(-std::numeric_limits<float>::infinity());
         if (return_softmax) {p.zero_();}
     }
+    // debug_timing set after params are initialized
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     auto t_before_params = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] Before params time: %.3f ms\n", 
@@ -938,6 +942,10 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      softcap,
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true);
+#ifdef DEBUG_FLEXI_TIMING
+    at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
+    params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
+#endif
     cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] After params time: %.3f ms\n", 
@@ -1006,7 +1014,18 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         out.zero_();
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
     }
-
+#ifdef DEBUG_FLEXI_TIMING
+    if (timing_buf.defined()) {
+        auto host = timing_buf.cpu();
+        auto data_ptr = host.data_ptr<int64_t>();
+        // resolve_cycles, main_cycles, block_count, indirection_cycles
+        printf("[DEBUG_TIMING] resolve: %lld, main: %lld, blocks: %lld, indirection: %lld\n",
+               static_cast<long long>(data_ptr[0]),
+               static_cast<long long>(data_ptr[1]),
+               static_cast<long long>(data_ptr[2]),
+               static_cast<long long>(data_ptr[3]));
+    }
+#endif
     if (seqlenq_ngroups_swapped) {
         int64_t size_before[] = {batch_size, max_seqlen_q, num_heads_k, head_size};
         int64_t size_after[] = {batch_size, num_heads_k * max_seqlen_q, head_size};
@@ -1961,6 +1980,10 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true
                      );
+#ifdef DEBUG_FLEXI_TIMING
+    at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
+    params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
+#endif
     cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] After params time: %.3f ms\n", 
@@ -2033,6 +2056,18 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
         out.zero_();
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
     }
+#ifdef DEBUG_FLEXI_TIMING
+    if (timing_buf.defined()) {
+        auto host = timing_buf.cpu();
+        auto data_ptr = host.data_ptr<int64_t>();
+        // resolve_cycles, main_cycles, block_count, indirection_cycles
+        printf("[DEBUG_TIMING] resolve: %lld, main: %lld, blocks: %lld, indirection: %lld\n",
+               static_cast<long long>(data_ptr[0]),
+               static_cast<long long>(data_ptr[1]),
+               static_cast<long long>(data_ptr[2]),
+               static_cast<long long>(data_ptr[3]));
+    }
+#endif
 
     if (seqlenq_ngroups_swapped) {
         int64_t size_before[] = {batch_size, max_seqlen_q, num_heads_k, head_size};

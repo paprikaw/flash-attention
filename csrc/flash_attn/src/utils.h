@@ -338,7 +338,7 @@ template <typename Kernel_traits>
 __forceinline__ __device__
 typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
     const int tidx, const int n_block, const int page_block_size, 
-    const int* block_table, const int page_stride, const int row_stride, void ** page_ptrs,
+    const int* block_table, const int page_stride, const int row_stride, void * const * __restrict__ page_ptrs,
     std::optional<int> partial_block_size = std::nullopt
 ) {
     constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
@@ -367,9 +367,11 @@ typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
     const int64_t virtual_page_idx = global_row_offset / page_block_size;
 
     using Element = typename Kernel_traits::Element;
-    return reinterpret_cast<Element*>(page_ptrs[block_table[virtual_page_idx]])
-        + page_offset * row_stride
-        + col_offset;
+    // Use __ldg to reduce pointer-chase latency on page table lookups.
+    const int page_idx = __ldg(block_table + virtual_page_idx);
+    // Load pointer value as integer to satisfy __ldg overloads.
+    const uintptr_t base_addr = __ldg(reinterpret_cast<const uintptr_t*>(page_ptrs) + page_idx);
+    return reinterpret_cast<Element*>(base_addr) + page_offset * row_stride + col_offset;
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // resolves offset of a slice of a paged kv copy from gmem.
@@ -378,7 +380,7 @@ template <typename Kernel_traits>
 __forceinline__ __device__
 typename Kernel_traits::Element* flexi_resolve_thread_kv_page_start_address(
     const int tidx, const int n_block, const int page_block_size, 
-    const int* block_table, const int page_stride, const int row_stride, void ** page_ptrs,
+    const int* block_table, const int page_stride, const int row_stride, void * const * __restrict__ page_ptrs,
     std::optional<int> partial_block_size = std::nullopt
 ) {
     constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
@@ -406,7 +408,9 @@ typename Kernel_traits::Element* flexi_resolve_thread_kv_page_start_address(
     const int64_t virtual_page_idx = global_row_offset / page_block_size;
 
     using Element = typename Kernel_traits::Element;
-    return reinterpret_cast<Element *>(page_ptrs[block_table[virtual_page_idx]]);
+    const int page_idx = __ldg(block_table + virtual_page_idx);
+    const uintptr_t base_addr = __ldg(reinterpret_cast<const uintptr_t*>(page_ptrs) + page_idx);
+    return reinterpret_cast<Element *>(base_addr);
 }
 
 // Layout reshape function. Given a layout with modes ((v1, v2), m, k), returns (v1, v2, k),         

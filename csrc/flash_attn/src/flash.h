@@ -108,6 +108,9 @@ struct Flash_fwd_params : public Qkv_params {
     void ** __restrict__ k_page_ptrs;
     void ** __restrict__ v_page_ptrs;
 
+    // Optional debug timing buffer (length >= 4) for debug timing; only used when DEBUG_FLEXI_TIMING is defined.
+    uint64_t* debug_timing;
+
     // The dropout probability (probability of keeping an activation).
     float p_dropout;
     // uint32_t p_dropout_in_uint;

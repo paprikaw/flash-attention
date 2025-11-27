@@ -629,6 +629,11 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tVgV = make_tensor(tVgV_.data(), reshape_thread_tile(tVgV_.layout()));
     Tensor tVsV = make_tensor(tVsV_.data(), reshape_thread_tile(tVsV_.layout()));
 
+#ifdef DEBUG_FLEXI_TIMING
+    const bool do_timing = params.debug_timing != nullptr;
+    uint64_t t0 = do_timing ? clock64() : 0;
+    uint64_t t1 = t0;
+#endif
     if (block_table != nullptr) {
         auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
         tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block_max - 1, params.page_block_size,
@@ -636,6 +641,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block_max - 1, params.page_block_size,
             block_table, params.v_batch_stride, params.v_row_stride, final_block_size);
     }
+#ifdef DEBUG_FLEXI_TIMING
+    if (do_timing) {
+        t1 = clock64();
+        if (tidx == 0) {
+            atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                      static_cast<unsigned long long>(t1 - t0));
+        }
+    }
+#endif
 
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
@@ -887,8 +901,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
             } else {
+                uint64_t t_ind0 = do_timing ? clock64() : 0;
                 tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                     block_table, params.v_batch_stride, params.v_row_stride);
+                if (do_timing && tidx == 0) {
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                              static_cast<unsigned long long>(clock64() - t_ind0));
+                }
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
         } else {
@@ -923,8 +942,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+                uint64_t t_ind0 = do_timing ? clock64() : 0;
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);
+                if (do_timing && tidx == 0) {
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                              static_cast<unsigned long long>(clock64() - t_ind0));
+                }
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -963,8 +987,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
-            tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size, 
+            uint64_t t_ind0 = do_timing ? clock64() : 0;
+            tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                 block_table, params.v_batch_stride, params.v_row_stride);
+            if (do_timing && tidx == 0) {
+                atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                          static_cast<unsigned long long>(clock64() - t_ind0));
+            }
         }
 
         FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
@@ -985,8 +1014,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+                uint64_t t_ind0 = do_timing ? clock64() : 0;
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);            
+                if (do_timing && tidx == 0) {
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                              static_cast<unsigned long long>(clock64() - t_ind0));
+                }
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1083,6 +1117,15 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
         gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
     );
+#ifdef DEBUG_FLEXI_TIMING
+    if (do_timing && tidx == 0) {
+        uint64_t t_end = clock64();
+        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 1),
+                  static_cast<unsigned long long>(t_end - t1));
+        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 2),
+                  static_cast<unsigned long long>(1));
+    }
+#endif
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1215,6 +1258,11 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     Tensor tVgV = make_tensor(tVgV_.data(), reshape_thread_tile(tVgV_.layout()));
     Tensor tVsV = make_tensor(tVsV_.data(), reshape_thread_tile(tVsV_.layout()));
 
+const bool do_timing = params.debug_timing != nullptr;
+#ifdef DEBUG_FLEXI_TIMING
+    uint64_t t0 = do_timing ? clock64() : 0;
+    uint64_t t1 = t0;
+#endif
     if (block_table != nullptr) {
         auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
         tKgK.data() = flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block_max - 1, params.page_block_size,
@@ -1222,6 +1270,15 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
         tVgV.data() = flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block_max - 1, params.page_block_size,
             block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs, final_block_size) + head_offset_v;
     }
+#ifdef DEBUG_FLEXI_TIMING
+    if (do_timing) {
+        t1 = clock64();
+        if (tidx == 0) {
+            atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                      static_cast<unsigned long long>(t1 - t0));
+        }
+    }
+#endif
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
     Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);                           // (MMA,MMA_M,MMA_K)
@@ -1548,8 +1605,13 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
         if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
+            uint64_t t_ind0 = do_timing ? clock64() : 0;
             tVgV.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size, 
                 block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs)) + head_offset_v;
+            if (do_timing && tidx == 0) {
+                atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                          static_cast<unsigned long long>(clock64() - t_ind0));
+            }
         }
 
         FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
@@ -1570,8 +1632,13 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+                uint64_t t_ind0 = do_timing ? clock64() : 0;
                 tKgK.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride, params.k_page_ptrs)) + head_offset_k;            
+                if (do_timing && tidx == 0) {
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
+                              static_cast<unsigned long long>(clock64() - t_ind0));
+                }
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1668,6 +1735,15 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     FLASH_NAMESPACE::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/false, /*Clear_OOB_K=*/false>(
         gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
     );
+#ifdef DEBUG_FLEXI_TIMING
+    if (do_timing && tidx == 0) {
+        uint64_t t_end = clock64();
+        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 1),
+                  static_cast<unsigned long long>(t_end - t1));
+        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 2),
+                  static_cast<unsigned long long>(1));
+    }
+#endif
 }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
