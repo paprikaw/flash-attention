@@ -21,7 +21,7 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 endif ()
 
 set(FA2_ENABLED ON)
-set(FA3_ENABLED OFF)
+set(FA3_ENABLED ON)
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
@@ -307,6 +307,7 @@ if (FA3_ENABLED AND ${CMAKE_CUDA_COMPILER_VERSION} GREATER_EQUAL 12.0)
         FLASHATTENTION_DISABLE_UNEVEN_K
         # FLASHATTENTION_DISABLE_LOCAL
         FLASHATTENTION_VARLEN_ONLY # Custom flag to save on binary size
+        FLASHATTENTION_DISABLE_PYBIND # Disable old pybind in flash_api.cpp, use flash_api_torch_lib.cpp instead
     )
 elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_LESS 12.0)
     message(STATUS "FA3 is disabled because CUDA version is not 12.0 or later.")
