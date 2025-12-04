@@ -19,13 +19,13 @@ except ImportError:
     from test_vllm_flash_attn import ref_paged_attn
 
 
-# NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
-NUM_HEADS = [(4, 4)]
-# HEAD_SIZES = [128, 256]
-HEAD_SIZES = [128]
-# BLOCK_SIZES = [16, 32]
-BLOCK_SIZES = [16]
-DTYPES = [torch.bfloat16]
+NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+# NUM_HEADS = [(8, 2)]
+HEAD_SIZES = [128, 256]
+# HEAD_SIZES = [128]
+BLOCK_SIZES = [16, 32]
+# BLOCK_SIZES = [16]
+DTYPES = [torch.bfloat16, torch.float16]
 # DTYPES = [torch.float16, torch.bfloat16]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
@@ -49,18 +49,16 @@ if not VERSIONS:
 # -----------------------------------------------------------------------------
 # Placeholder for your new kernel function
 # -----------------------------------------------------------------------------
-# @pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
-@pytest.mark.parametrize("seq_lens", [[(129, 463)]])
+@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+# @pytest.mark.parametrize("seq_lens", [[(100, 2000)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [10.0])
-# @pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+# @pytest.mark.parametrize("soft_cap", [10.0])
+@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
-# @pytest.mark.parametrize("aot_schedule", [True, False])
-@pytest.mark.parametrize("aot_schedule", [False])
 @pytest.mark.parametrize("fa_version", VERSIONS)
 @torch.inference_mode()
 def test_flexi_flash_attn_kv_split(
@@ -72,7 +70,6 @@ def test_flexi_flash_attn_kv_split(
         block_size: int,
         soft_cap: Optional[float],
         num_blocks: int,
-        aot_schedule: bool,
         fa_version: int,
 ) -> None:
     torch.set_default_device("cuda")
@@ -82,6 +79,8 @@ def test_flexi_flash_attn_kv_split(
     kv_lens = [x[1] for x in seq_lens]
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
+    print(f"num of kv heads: {num_kv_heads}")
+    print(f"num of query heads: {num_query_heads}")
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
@@ -162,7 +161,6 @@ def test_flexi_flash_attn_kv_split(
             fa_version=fa_version
         )
 
-    free_flexi_kv_ptrs(k_ptrs, v_ptrs)
     block_tables2 = torch.randint(0,
                                  num_blocks,
                                  (num_seqs, max_num_blocks_per_seq),
@@ -182,7 +180,6 @@ def test_flexi_flash_attn_kv_split(
     # for v_tensor in value_cache:
     #     copied_tensor = v_tensor.clone()
     #     v_pages.append(copied_tensor)
-    k_ptrs, v_ptrs = prepare_flexi_kv_ptrs(k_pages, v_pages);
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
 
@@ -248,3 +245,6 @@ def test_flexi_flash_attn_kv_split(
 
     torch.testing.assert_close(output1, ref_output, atol=2e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output1 - ref_output))}"
+
+    torch.testing.assert_close(output2, ref_output, atol=2e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(output2 - ref_output))}"

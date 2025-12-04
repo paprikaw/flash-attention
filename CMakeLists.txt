@@ -205,7 +205,8 @@ if (FA2_ENABLED)
         # FLASHATTENTION_DISABLE_LOCAL
         FLASHATTENTION_VARLEN_ONLY # Custom flag to save on binary size
         FLASHATTENTION_DISABLE_SPARSE # Disable sparse kernels
-        DEBUG_FLEXI_TIMING
+        # DEBUG_FLEXI_TIMING
+        # DEBUG_FLEXI
     )
     if (DEFINED ENV{FLASHATTENTION_ONLY_BF16})
         target_compile_definitions(_vllm_fa2_C PRIVATE FLASHATTENTION_ONLY_BF16)

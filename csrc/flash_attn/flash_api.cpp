@@ -5,7 +5,9 @@
 // Include these 2 headers instead of torch/extension.h since we don't need all of the torch headers.
 #include <ATen/core/TensorBody.h>
 #include <algorithm>
+#ifdef DEBUG_FLEXI_TIMING
 #include <chrono>
+#endif
 #include <c10/util/Exception.h>
 #include <torch/nn/functional.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -257,7 +259,7 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
     params.o_head_stride = out.stride(-2);
     params.is_bf16 = q.dtype() == torch::kBFloat16;
 
-
+    // 当前的实现仅考虑varlen的情况
     assert(cu_seqlens_q_d != nullptr);
 
     params.cu_seqlens_q = static_cast<int *>(cu_seqlens_q_d);
@@ -494,7 +496,9 @@ void run_flexi_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
                 TORCH_CHECK(params.num_splits > 0 || force_split_kernel, "flexi must use split-kv");
+#ifdef DEBUG_FLEXI
                 printf("DEBUG: run_flexi_mha_fwd: headdim=%d, is_causal=%d, num_splits=%d\n", kHeadDim, Is_causal, params.num_splits);
+#endif
                 run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
             });
         });
@@ -782,7 +786,9 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const float softcap,
                const bool return_softmax,
                std::optional<at::Generator> gen_) {
+#ifdef DEBUG_FLEXI_TIMING
     auto t_start = std::chrono::high_resolution_clock::now();
+#endif
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
 
@@ -919,9 +925,11 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     }
     // debug_timing set after params are initialized
     auto stream = at::cuda::getCurrentCUDAStream().stream();
+#ifdef DEBUG_FLEXI_TIMING
     auto t_before_params = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] Before params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_params - t_start).count());
+#endif
     Flash_fwd_params params;
     set_params_fprop(params,
                      batch_size,
@@ -947,9 +955,11 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
     cudaStreamSynchronize(stream);
+#ifdef DEBUG_FLEXI_TIMING
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] After params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
+#endif
     params.total_q = total_q;
 
     if (paged_KV) {
@@ -998,17 +1008,20 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     // }
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+#ifdef DEBUG_FLEXI_TIMING
     auto t_before_kernel = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] Pre-kernel setup time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_kernel - t_after_params).count());
+#endif
 
     if (max_seqlen_k > 0) {
         run_mha_fwd(params, stream, paged_KV);
         cudaStreamSynchronize(stream);
-        
+#ifdef DEBUG_FLEXI_TIMING
         auto t_after_kernel = std::chrono::high_resolution_clock::now();
         printf("[Normal BENCHMARK] Kernel execution time: %.3f ms\n", 
                std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
+#endif
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
@@ -1019,7 +1032,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         auto host = timing_buf.cpu();
         auto data_ptr = host.data_ptr<int64_t>();
         // resolve_cycles, main_cycles, block_count, indirection_cycles
-        printf("[DEBUG_TIMING] resolve: %lld, main: %lld, blocks: %lld, indirection: %lld\n",
+        printf("[DEBUG_TIMING_NORMAL] resolve: %lld, main: %lld, blocks: %lld, indirection: %lld\n",
                static_cast<long long>(data_ptr[0]),
                static_cast<long long>(data_ptr[1]),
                static_cast<long long>(data_ptr[2]),
@@ -1046,9 +1059,11 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         softmax_lse = softmax_lse.reshape(lse_size_before).transpose(1, 2).reshape(lse_size_after);
     }
     cudaStreamSynchronize(stream);
+#ifdef DEBUG_FLEXI_TIMING
     auto t_end = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] Total time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_end - t_start).count());
+#endif
 
     return {out, softmax_lse};
 }
@@ -1810,7 +1825,9 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                int64_t cached_k_ptrs,
                int64_t cached_v_ptrs) {
 
+#ifdef DEBUG_FLEXI_TIMING
     auto t_start = std::chrono::high_resolution_clock::now();
+#endif
 
     // Otherwise the kernel will be launched from cuda:0 device
     at::cuda::CUDAGuard device_guard{q.device()};
@@ -1941,9 +1958,11 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
         if (return_softmax) {p.zero_();}
     }
     auto stream = at::cuda::getCurrentCUDAStream().stream();
+#ifdef DEBUG_FLEXI_TIMING
     auto t_before_params = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] Before params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_params - t_start).count());
+#endif
 
     Flash_fwd_params params;
     // printf("DEBUG: flexi_mha_varlen_fwd: batch_size=%d, num_heads=%d, head_size=%d, num_heads_k=%d, max_seqlen_q=%d, max_seqlen_k=%d\n",
@@ -1985,30 +2004,33 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
     cudaStreamSynchronize(stream);
+#ifdef DEBUG_FLEXI_TIMING
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] After params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
+#endif
     params.total_q = total_q;
 
     if (paged_KV) {
         params.block_table = block_table.data_ptr<int>();
         params.block_table_batch_stride = block_table.stride(0);
-        params.k_batch_stride = k_meta.stride(0);
-        params.v_batch_stride = v_meta.stride(0);
+        // params.k_batch_stride = k_meta.stride(0);
+        // params.v_batch_stride = v_meta.stride(0);
     }
     params.page_block_size = page_block_size;
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
-    if (seqlenq_ngroups_swapped) {
-        // printf("DEBUG: flexi_mha_varlen_fwd: using split-k for decoding optimization\n");
-        // Only apply split-k for decoding
-        std::tie(softmax_lse_accum, out_accum) =
-            set_params_splitkv(params, batch_size, num_heads, head_size,
-                               max_seqlen_k, max_seqlen_q, head_size_rounded,
-                               p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
-    } else {
-        // printf("DEBUG: flexi_mha_varlen_fwd: not using split-k for decoding optimization\n");
-    }
+    // DISABLED split-k for debugging
+    // if (seqlenq_ngroups_swapped) {
+    //     // printf("DEBUG: flexi_mha_varlen_fwd: using split-k for decoding optimization\n");
+    //     // Only apply split-k for decoding
+    //     std::tie(softmax_lse_accum, out_accum) =
+    //         set_params_splitkv(params, batch_size, num_heads, head_size,
+    //                            max_seqlen_k, max_seqlen_q, head_size_rounded,
+    //                            p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
+    // } else {
+    //     // printf("DEBUG: flexi_mha_varlen_fwd: not using split-k for decoding optimization\n");
+    // }
 
     if (leftpad_k_.has_value()) {
         auto leftpad_k = leftpad_k_.value();
@@ -2040,17 +2062,20 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
 
     set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
 
+#ifdef DEBUG_FLEXI_TIMING
     auto t_before_kernel = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] Pre-kernel setup time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_kernel - t_after_params).count());
+#endif
 
     if (max_seqlen_k > 0) {
         run_flexi_mha_fwd(params, stream, paged_KV);
         cudaStreamSynchronize(stream);
-        
+#ifdef DEBUG_FLEXI_TIMING
         auto t_after_kernel = std::chrono::high_resolution_clock::now();
         printf("[BENCHMARK] Kernel execution time: %.3f ms\n", 
                std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
+#endif
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
@@ -2061,11 +2086,10 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
         auto host = timing_buf.cpu();
         auto data_ptr = host.data_ptr<int64_t>();
         // resolve_cycles, main_cycles, block_count, indirection_cycles
-        printf("[DEBUG_TIMING] resolve: %lld, main: %lld, blocks: %lld, indirection: %lld\n",
+        printf("[DEBUG_TIMING_FLEXI] resolve address: %lld, main: %lld, blocks: %lld\n",
                static_cast<long long>(data_ptr[0]),
                static_cast<long long>(data_ptr[1]),
-               static_cast<long long>(data_ptr[2]),
-               static_cast<long long>(data_ptr[3]));
+               static_cast<long long>(data_ptr[2]));
     }
 #endif
 
@@ -2090,9 +2114,11 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     }
 
     cudaStreamSynchronize(stream);
+#ifdef DEBUG_FLEXI_TIMING
     auto t_end = std::chrono::high_resolution_clock::now();
     printf("[BENCHMARK] Total flexi_mha_varlen_fwd time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_end - t_start).count());
+#endif
 
     return {out, softmax_lse};
 }

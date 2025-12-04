@@ -901,13 +901,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
             } else {
+#ifdef DEBUG_FLEXI_TIMING
                 uint64_t t_ind0 = do_timing ? clock64() : 0;
+#endif
                 tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                     block_table, params.v_batch_stride, params.v_row_stride);
+#ifdef DEBUG_FLEXI_TIMING
                 if (do_timing && tidx == 0) {
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
                               static_cast<unsigned long long>(clock64() - t_ind0));
                 }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
         } else {
@@ -942,13 +946,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+#ifdef DEBUG_FLEXI_TIMING
                 uint64_t t_ind0 = do_timing ? clock64() : 0;
+#endif
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);
+#ifdef DEBUG_FLEXI_TIMING
                 if (do_timing && tidx == 0) {
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
                               static_cast<unsigned long long>(clock64() - t_ind0));
                 }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -987,13 +995,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
+#ifdef DEBUG_FLEXI_TIMING
             uint64_t t_ind0 = do_timing ? clock64() : 0;
+#endif
             tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                 block_table, params.v_batch_stride, params.v_row_stride);
+#ifdef DEBUG_FLEXI_TIMING
             if (do_timing && tidx == 0) {
                 atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
                           static_cast<unsigned long long>(clock64() - t_ind0));
             }
+#endif
         }
 
         FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
@@ -1014,13 +1026,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+#ifdef DEBUG_FLEXI_TIMING
                 uint64_t t_ind0 = do_timing ? clock64() : 0;
+#endif
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);            
+#ifdef DEBUG_FLEXI_TIMING
                 if (do_timing && tidx == 0) {
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
                               static_cast<unsigned long long>(clock64() - t_ind0));
                 }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1132,6 +1148,13 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
 
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Split, bool Append_KV, typename Params>
 inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int num_n_splits) {
+
+#ifdef DEBUG_FLEXI_TIMING
+    uint64_t t_start = clock64();
+    uint64_t before = t_start;
+    uint64_t now = t_start;
+#endif
+
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -1258,10 +1281,10 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     Tensor tVgV = make_tensor(tVgV_.data(), reshape_thread_tile(tVgV_.layout()));
     Tensor tVsV = make_tensor(tVsV_.data(), reshape_thread_tile(tVsV_.layout()));
 
-const bool do_timing = params.debug_timing != nullptr;
 #ifdef DEBUG_FLEXI_TIMING
-    uint64_t t0 = do_timing ? clock64() : 0;
-    uint64_t t1 = t0;
+        if (tidx == 0 ) {
+            before = clock64();
+        }
 #endif
     if (block_table != nullptr) {
         auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
@@ -1271,13 +1294,11 @@ const bool do_timing = params.debug_timing != nullptr;
             block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs, final_block_size) + head_offset_v;
     }
 #ifdef DEBUG_FLEXI_TIMING
-    if (do_timing) {
-        t1 = clock64();
-        if (tidx == 0) {
+        if (tidx == 0 ) {
+            now = clock64();
             atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                      static_cast<unsigned long long>(t1 - t0));
+                      static_cast<unsigned long long>(before - now));
         }
-    }
 #endif
     typename Kernel_traits::TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tidx);
@@ -1529,8 +1550,20 @@ const bool do_timing = params.debug_timing != nullptr;
             if (block_table == nullptr) {
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
             } else {
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
+#endif
                 tVgV.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                     block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs)) + head_offset_v;
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                        static_cast<unsigned long long>(before - now));
+                }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
         } else {
@@ -1565,8 +1598,21 @@ const bool do_timing = params.debug_timing != nullptr;
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
+#endif
+
                 tKgK.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride, params.k_page_ptrs)) + head_offset_k;
+#ifdef debug_flexi_timing
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicadd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                        static_cast<unsigned long long>(before - now));
+                }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1605,13 +1651,21 @@ const bool do_timing = params.debug_timing != nullptr;
         if (block_table == nullptr) {
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
-            uint64_t t_ind0 = do_timing ? clock64() : 0;
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
+#endif
+
             tVgV.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size, 
                 block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs)) + head_offset_v;
-            if (do_timing && tidx == 0) {
-                atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                          static_cast<unsigned long long>(clock64() - t_ind0));
-            }
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                        static_cast<unsigned long long>(before - now));
+                }
+#endif
         }
 
         FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
@@ -1632,13 +1686,20 @@ const bool do_timing = params.debug_timing != nullptr;
             if (block_table == nullptr) {
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
-                uint64_t t_ind0 = do_timing ? clock64() : 0;
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
+#endif
                 tKgK.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride, params.k_page_ptrs)) + head_offset_k;            
-                if (do_timing && tidx == 0) {
-                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                              static_cast<unsigned long long>(clock64() - t_ind0));
+#ifdef DEBUG_FLEXI_TIMING
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                        static_cast<unsigned long long>(before - now));
                 }
+#endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tKgK, tKsK, tKVcKV, tKVpKV);
             // This cp_async_fence needs to be in the if block, otherwise the synchronization
@@ -1736,7 +1797,7 @@ const bool do_timing = params.debug_timing != nullptr;
         gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
     );
 #ifdef DEBUG_FLEXI_TIMING
-    if (do_timing && tidx == 0) {
+    if (tidx == 0) {
         uint64_t t_end = clock64();
         atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 1),
                   static_cast<unsigned long long>(t_end - t1));

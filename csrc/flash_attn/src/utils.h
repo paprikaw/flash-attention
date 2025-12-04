@@ -373,6 +373,54 @@ typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
     const uintptr_t base_addr = __ldg(reinterpret_cast<const uintptr_t*>(page_ptrs) + page_idx);
     return reinterpret_cast<Element*>(base_addr) + page_offset * row_stride + col_offset;
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// Optimized version: resolve both K and V addresses with single block_table lookup
+// This reduces memory accesses by sharing the page_idx lookup between K and V
+template <typename Kernel_traits>
+__forceinline__ __device__
+void flexi_resolve_thread_kv_pair_offset(
+    const int tidx, const int n_block, const int page_block_size, 
+    const int* __restrict__ block_table, 
+    const int k_row_stride, const int v_row_stride,
+    void * const * __restrict__ k_page_ptrs,
+    void * const * __restrict__ v_page_ptrs,
+    typename Kernel_traits::Element* &k_ptr_out,
+    typename Kernel_traits::Element* &v_ptr_out,
+    std::optional<int> partial_block_size = std::nullopt
+) {
+    constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
+    constexpr int kGmemRowsPerThread = Kernel_traits::kGmemRowsPerThread;
+    constexpr int kGmemElemsPerLoad = Kernel_traits::kGmemElemsPerLoad;
+    constexpr int kBlockN = Kernel_traits::kBlockN;
+
+    const int64_t col_offset = tidx % kGmemThreadsPerRow * kGmemElemsPerLoad;
+    int64_t block_row_offset = tidx / kGmemThreadsPerRow * kGmemRowsPerThread;
+
+    if (partial_block_size) {
+        auto final_row_offset = std::max(*partial_block_size - 1, 0);
+        auto final_thread_row_offset = 
+          ceil_div(final_row_offset, kGmemRowsPerThread) * kGmemRowsPerThread;
+        block_row_offset = std::min(
+            block_row_offset, int64_t(final_thread_row_offset));
+    }
+
+    const int64_t global_row_offset = block_row_offset + n_block * kBlockN;
+    const int64_t page_offset = global_row_offset % page_block_size;
+    const int64_t virtual_page_idx = global_row_offset / page_block_size;
+
+    using Element = typename Kernel_traits::Element;
+    // Single block_table lookup - shared between K and V
+    const int page_idx = __ldg(block_table + virtual_page_idx);
+    
+    // Load K and V base addresses
+    const uintptr_t k_base_addr = __ldg(reinterpret_cast<const uintptr_t*>(k_page_ptrs) + page_idx);
+    const uintptr_t v_base_addr = __ldg(reinterpret_cast<const uintptr_t*>(v_page_ptrs) + page_idx);
+    
+    k_ptr_out = reinterpret_cast<Element*>(k_base_addr) + page_offset * k_row_stride + col_offset;
+    v_ptr_out = reinterpret_cast<Element*>(v_base_addr) + page_offset * v_row_stride + col_offset;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // resolves offset of a slice of a paged kv copy from gmem.
 // assumes that the tensor has already been positioned at the correct head.
