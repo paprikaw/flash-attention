@@ -368,10 +368,7 @@ typename Kernel_traits::Element* flexi_resolve_thread_kv_page_slice_offset(
 
     using Element = typename Kernel_traits::Element;
     // Use __ldg to reduce pointer-chase latency on page table lookups.
-    const int page_idx = __ldg(block_table + virtual_page_idx);
-    // Load pointer value as integer to satisfy __ldg overloads.
-    const uintptr_t base_addr = __ldg(reinterpret_cast<const uintptr_t*>(page_ptrs) + page_idx);
-    return reinterpret_cast<Element*>(base_addr) + page_offset * row_stride + col_offset;
+    return reinterpret_cast<Element*>(page_ptrs[((int64_t) block_table[virtual_page_idx])]) + page_offset * row_stride + col_offset;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

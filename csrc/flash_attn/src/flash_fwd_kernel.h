@@ -26,7 +26,6 @@ namespace FLASH_NAMESPACE {
 using namespace cute;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
-
 template<typename ElementAccum, typename Params, int kBlockM, bool Is_even_MN>
 __forceinline__ __device__ auto get_lse_tile(const Params &params, const int bidb, const int bidh, const int m_block, const BlockInfo</*Varlen=*/!Is_even_MN> &binfo) {
         // When params.unpadded_lse is false, LSE is written as (b, h, seqlen_q) - this is non-variable seqlen path.
@@ -498,6 +497,12 @@ inline __device__ void compute_attn_1rowblock(const Params &params, const int bi
 template<typename Kernel_traits, bool Is_causal, bool Is_local, bool Has_alibi, bool Is_even_MN, bool Is_even_K, bool Is_softcap, bool Split, bool Append_KV, typename Params>
 inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, const int bidb, const int bidh, const int m_block, const int n_split_idx, const int num_n_splits) {
 
+#ifdef DEBUG_FLEXI_TIMING
+    uint64_t t_start = clock64();
+    uint64_t before = t_start;
+    uint64_t now = t_start;
+#endif    
+
     using Element = typename Kernel_traits::Element;
     using ElementAccum = typename Kernel_traits::ElementAccum;
     using index_t = typename Kernel_traits::index_t;
@@ -630,9 +635,9 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
     Tensor tVsV = make_tensor(tVsV_.data(), reshape_thread_tile(tVsV_.layout()));
 
 #ifdef DEBUG_FLEXI_TIMING
-    const bool do_timing = params.debug_timing != nullptr;
-    uint64_t t0 = do_timing ? clock64() : 0;
-    uint64_t t1 = t0;
+    if (tidx == 0) {
+        before = clock64();
+    }
 #endif
     if (block_table != nullptr) {
         auto final_block_size = binfo.actual_seqlen_k - (n_block_max - 1) * kBlockN;
@@ -642,12 +647,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             block_table, params.v_batch_stride, params.v_row_stride, final_block_size);
     }
 #ifdef DEBUG_FLEXI_TIMING
-    if (do_timing) {
-        t1 = clock64();
-        if (tidx == 0) {
-            atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                      static_cast<unsigned long long>(t1 - t0));
-        }
+    if (tidx == 0 ) {
+        now = clock64();
+        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                  static_cast<unsigned long long>(now - before));
     }
 #endif
 
@@ -805,10 +808,22 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
                 if (n_block > n_block_copy_min) {
+#ifdef DEBUG_FLEXI_TIMING
+                    if (tidx == 0 ) {
+                        before = clock64();
+                    }
+#endif
                     tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                         block_table, params.v_batch_stride, params.v_row_stride);
                     tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                         block_table, params.k_batch_stride, params.k_row_stride);
+#ifdef DEBUG_FLEXI_TIMING
+                    if (tidx == 0 ) {
+                        now = clock64();
+                        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                                  static_cast<unsigned long long>(now - before));
+                    }
+#endif
                 }
             }
         }
@@ -902,15 +917,18 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
             } else {
 #ifdef DEBUG_FLEXI_TIMING
-                uint64_t t_ind0 = do_timing ? clock64() : 0;
+                    if (tidx == 0 ) {
+                        before = clock64();
+                    }
 #endif
                 tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                     block_table, params.v_batch_stride, params.v_row_stride);
 #ifdef DEBUG_FLEXI_TIMING
-                if (do_timing && tidx == 0) {
-                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                              static_cast<unsigned long long>(clock64() - t_ind0));
-                }
+                    if (tidx == 0 ) {
+                        now = clock64();
+                        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                                  static_cast<unsigned long long>(now - before));
+                    }
 #endif
             }
             FLASH_NAMESPACE::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_KV, tVgV, tVsV, tKVcKV, tKVpKV);
@@ -947,14 +965,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
 #ifdef DEBUG_FLEXI_TIMING
-                uint64_t t_ind0 = do_timing ? clock64() : 0;
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
 #endif
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);
 #ifdef DEBUG_FLEXI_TIMING
-                if (do_timing && tidx == 0) {
-                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                              static_cast<unsigned long long>(clock64() - t_ind0));
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                              static_cast<unsigned long long>(now - before));
                 }
 #endif
             }
@@ -996,14 +1017,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
             tVgV.data() = tVgV.data() + (-int(kBlockN * params.v_row_stride));
         } else {
 #ifdef DEBUG_FLEXI_TIMING
-            uint64_t t_ind0 = do_timing ? clock64() : 0;
+            if (tidx == 0 ) {
+                before = clock64();
+            }
 #endif
             tVgV.data() = gV.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block, params.page_block_size,
                 block_table, params.v_batch_stride, params.v_row_stride);
 #ifdef DEBUG_FLEXI_TIMING
-            if (do_timing && tidx == 0) {
-                atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                          static_cast<unsigned long long>(clock64() - t_ind0));
+            if (tidx == 0 ) {
+                now = clock64();
+                atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                          static_cast<unsigned long long>(now - before));
             }
 #endif
         }
@@ -1027,14 +1051,17 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
 #ifdef DEBUG_FLEXI_TIMING
-                uint64_t t_ind0 = do_timing ? clock64() : 0;
+                if (tidx == 0 ) {
+                    before = clock64();
+                }
 #endif
                 tKgK.data() = gK.data() + flash::resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride);            
 #ifdef DEBUG_FLEXI_TIMING
-                if (do_timing && tidx == 0) {
-                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 3),
-                              static_cast<unsigned long long>(clock64() - t_ind0));
+                if (tidx == 0 ) {
+                    now = clock64();
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                              static_cast<unsigned long long>(now - before));
                 }
 #endif
             }
@@ -1134,10 +1161,10 @@ inline __device__ void compute_attn_1rowblock_splitkv(const Params &params, cons
         gmem_tiled_copy_Oaccum, tOrOaccum, tOgOaccum, tOcO, tOpO, binfo.actual_seqlen_q - m_block * kBlockM
     );
 #ifdef DEBUG_FLEXI_TIMING
-    if (do_timing && tidx == 0) {
+    if (tidx == 0) {
         uint64_t t_end = clock64();
         atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 1),
-                  static_cast<unsigned long long>(t_end - t1));
+                  static_cast<unsigned long long>(t_end - t_start));
         atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 2),
                   static_cast<unsigned long long>(1));
     }
@@ -1242,6 +1269,14 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     const int *block_table = params.block_table == nullptr ? nullptr : params.block_table + bidb * params.block_table_batch_stride;
     const index_t head_offset_k = (bidh / params.h_h_k_ratio) * params.k_head_stride; // block addresses are later resolved per-thread
     const index_t head_offset_v = (bidh / params.h_h_k_ratio) * params.v_head_stride;
+    // const index_t row_offset_k = block_table == nullptr
+    //     ? binfo.k_offset(params.k_batch_stride, params.k_row_stride, bidb_cache)
+    //       + (n_block_max - 1) * kBlockN * params.k_row_stride + (bidh / params.h_h_k_ratio) * params.k_head_stride
+    //     : (bidh / params.h_h_k_ratio) * params.k_head_stride; // block addresses are later resolved per-thread
+    // const index_t row_offset_v = block_table == nullptr
+    //     ? binfo.k_offset(params.v_batch_stride, params.v_row_stride, bidb_cache)
+    //       + (n_block_max - 1) * kBlockN * params.v_row_stride + (bidh / params.h_h_k_ratio) * params.v_head_stride
+    //     : (bidh / params.h_h_k_ratio) * params.v_head_stride;
 
     Tensor mQ = make_tensor(make_gmem_ptr(reinterpret_cast<Element*>(params.q_ptr) + binfo.q_offset(params.q_batch_stride, params.q_row_stride, bidb)),
                             make_shape(binfo.actual_seqlen_q, params.h, params.d),
@@ -1251,10 +1286,23 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     Tensor gK = make_tensor(make_gmem_ptr((Element*)nullptr),
                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
                             make_stride(params.k_row_stride, _1{}));
+    // Tensor gK = make_tensor(make_gmem_ptr((Element*)(params.k_ptr)),
+    //                         Shape<Int<kBlockN>, Int<kHeadDim>>{},
+    //                         make_stride(params.k_row_stride, _1{}));
     // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { printf("k_ptr = %p, row_offset_k = %d, gK_ptr = %p\n", params.k_ptr, row_offset_k, gK.data()); }
     Tensor gV = make_tensor(make_gmem_ptr((Element*)nullptr),
                             Shape<Int<kBlockN>, Int<kHeadDim>>{},
                             make_stride(params.v_row_stride, _1{}));
+    // Tensor gV = make_tensor(make_gmem_ptr((Element*)(params.v_ptr)),
+    //                         Shape<Int<kBlockN>, Int<kHeadDim>>{},
+    //                         make_stride(params.v_row_stride, _1{}));
+    // Tensor gK = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.k_ptr) + row_offset_k),
+    //                         Shape<Int<kBlockN>, Int<kHeadDim>>{},
+    //                         make_stride(params.k_row_stride, _1{}));
+    // // if (threadIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) { printf("k_ptr = %p, row_offset_k = %d, gK_ptr = %p\n", params.k_ptr, row_offset_k, gK.data()); }
+    // Tensor gV = make_tensor(make_gmem_ptr(reinterpret_cast<Element *>(params.v_ptr) + row_offset_v),
+    //                         Shape<Int<kBlockN>, Int<kHeadDim>>{},
+    //                         make_stride(params.v_row_stride, _1{}));
 
     Tensor sQ = make_tensor(make_smem_ptr(reinterpret_cast<Element *>(smem_)),
                             typename Kernel_traits::SmemLayoutQ{});
@@ -1297,7 +1345,7 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
         if (tidx == 0 ) {
             now = clock64();
             atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                      static_cast<unsigned long long>(before - now));
+                      static_cast<unsigned long long>(now - before));
         }
 #endif
     typename Kernel_traits::TiledMma tiled_mma;
@@ -1454,10 +1502,22 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
                 tKgK.data() = tKgK.data() + (-int(kBlockN * params.k_row_stride));
             } else {
                 if (n_block > n_block_copy_min) {
+#ifdef DEBUG_FLEXI_TIMING
+                    if (tidx == 0 ) {
+                        before = clock64();
+                    }
+#endif
                     tVgV.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                         block_table, params.v_batch_stride, params.v_row_stride, params.v_page_ptrs)) + head_offset_v;
                     tKgK.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                         block_table, params.k_batch_stride, params.k_row_stride, params.k_page_ptrs)) + head_offset_k;
+#ifdef DEBUG_FLEXI_TIMING
+                    if (tidx == 0 ) {
+                        now = clock64();
+                        atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                            static_cast<unsigned long long>(now - before));
+                    }
+#endif
                 }
             }
         }
@@ -1561,7 +1621,7 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
                 if (tidx == 0 ) {
                     now = clock64();
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                        static_cast<unsigned long long>(before - now));
+                        static_cast<unsigned long long>(now - before));
                 }
 #endif
             }
@@ -1606,11 +1666,11 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
 
                 tKgK.data() = reinterpret_cast<Element *>(flash::flexi_resolve_thread_kv_page_slice_offset<Kernel_traits>(tidx, n_block - 1, params.page_block_size, 
                     block_table, params.k_batch_stride, params.k_row_stride, params.k_page_ptrs)) + head_offset_k;
-#ifdef debug_flexi_timing
+#ifdef DEBUG_FLEXI_TIMING
                 if (tidx == 0 ) {
                     now = clock64();
-                    atomicadd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                        static_cast<unsigned long long>(before - now));
+                    atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
+                        static_cast<unsigned long long>(now - before));
                 }
 #endif
             }
@@ -1663,7 +1723,7 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
                 if (tidx == 0 ) {
                     now = clock64();
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                        static_cast<unsigned long long>(before - now));
+                        static_cast<unsigned long long>(now - before));
                 }
 #endif
         }
@@ -1697,7 +1757,7 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
                 if (tidx == 0 ) {
                     now = clock64();
                     atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 0),
-                        static_cast<unsigned long long>(before - now));
+                        static_cast<unsigned long long>(now - before));
                 }
 #endif
             }
@@ -1800,7 +1860,7 @@ inline __device__ void flexi_compute_attn_1rowblock_splitkv(const Params &params
     if (tidx == 0) {
         uint64_t t_end = clock64();
         atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 1),
-                  static_cast<unsigned long long>(t_end - t1));
+                  static_cast<unsigned long long>(t_end - t_start));
         atomicAdd(reinterpret_cast<unsigned long long*>(params.debug_timing + 2),
                   static_cast<unsigned long long>(1));
     }

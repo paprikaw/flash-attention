@@ -38,7 +38,7 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12" "3.13")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "8.0;8.6;8.9;9.0")
+set(CUDA_SUPPORTED_ARCHS "8.0")
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
     list(APPEND CUDA_SUPPORTED_ARCHS "10.0" "10.1" "12.0")
 endif()
@@ -159,6 +159,11 @@ if (FA2_ENABLED)
     if (DEFINED ENV{FLASHATTENTION_ONLY_BF16})
         message(STATUS "Filtering out FP16 kernels (FLASHATTENTION_ONLY_BF16 is set)")
         list(FILTER FA2_GEN_SRCS EXCLUDE REGEX "fp16")
+    endif()
+
+    if (DEFINED ENV{FLASHATTENTION_ONLY_FP16})
+        message(STATUS "Filtering out BP16 kernels (FLASHATTENTION_ONLY_FP16 is set)")
+        list(FILTER FA2_GEN_SRCS EXCLUDE REGEX "bf16")
     endif()
 
     # Filter out sparse kernels if requested (or by default if we want to save time)

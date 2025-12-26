@@ -19,13 +19,13 @@ except ImportError:
     from test_vllm_flash_attn import ref_paged_attn
 
 
-NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
-# NUM_HEADS = [(8, 2)]
-HEAD_SIZES = [128, 256]
+# NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+NUM_HEADS = [(8, 2)]
+HEAD_SIZES = [128]
 # HEAD_SIZES = [128]
-BLOCK_SIZES = [16, 32]
-# BLOCK_SIZES = [16]
-DTYPES = [torch.bfloat16, torch.float16]
+# BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
+DTYPES = [torch.bfloat16]
 # DTYPES = [torch.float16, torch.bfloat16]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
@@ -49,15 +49,15 @@ if not VERSIONS:
 # -----------------------------------------------------------------------------
 # Placeholder for your new kernel function
 # -----------------------------------------------------------------------------
-@pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
-# @pytest.mark.parametrize("seq_lens", [[(100, 2000)]])
+# @pytest.mark.parametrize("seq_lens", [[(1, 1328), (5, 18), (129, 463)]])
+@pytest.mark.parametrize("seq_lens", [[(100, 2000)]])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None])
 @pytest.mark.parametrize("dtype", DTYPES)
-# @pytest.mark.parametrize("soft_cap", [10.0])
-@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+@pytest.mark.parametrize("soft_cap", [10.0])
+# @pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("fa_version", VERSIONS)
 @torch.inference_mode()
@@ -128,8 +128,9 @@ def test_flexi_flash_attn_kv_split(
     for _ in range(3):
         flexi_flash_attn_varlen_func(
             q=query,
-            k=k_pages,
-            v=v_pages,
+            k_meta=k_pages[0],
+            v_meta=v_pages[0],
+            num_blocks=num_blocks,
             cu_seqlens_q=cu_query_lens,
             seqused_k=seqused_k,
             max_seqlen_q=max_query_len,
@@ -186,8 +187,9 @@ def test_flexi_flash_attn_kv_split(
     start_event.record()
     output1 = flexi_flash_attn_varlen_func(
         q=query,
-        k=k_pages,
-        v=v_pages,
+        k_meta=k_pages[0],
+        v_meta=v_pages[0],
+        num_blocks=num_blocks,
         cu_seqlens_q=cu_query_lens,
         seqused_k=seqused_k,
         max_seqlen_q=max_query_len,

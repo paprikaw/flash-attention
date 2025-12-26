@@ -282,8 +282,9 @@ def flash_attn_varlen_func(
 
 def flexi_flash_attn_varlen_func(
     q,
-    k: List[torch.Tensor],
-    v: List[torch.Tensor],
+    k_meta,
+    v_meta,
+    num_blocks,
     max_seqlen_q,
     cu_seqlens_q,
     max_seqlen_k,
@@ -382,9 +383,6 @@ def flexi_flash_attn_varlen_func(
         real_window_size = (window_size[0], window_size[1])
     q = maybe_contiguous(q)
     # Use a single representative page tensor to carry stride/shape metadata.
-    k_meta = maybe_contiguous(k[0])
-    v_meta = maybe_contiguous(v[0])
-    num_blocks = len(k)
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
     assert fa_version == 2 
     if scheduler_metadata is not None and q_descale is not None \
