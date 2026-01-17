@@ -799,3 +799,158 @@ def free_flexi_kv_ptrs(k_ptrs: int, v_ptrs: int):
         v_ptrs: Cached V pointers (int)
     """
     torch.ops._vllm_fa2_C.free_flexi_kv_ptrs(k_ptrs, v_ptrs)
+
+
+def block_table_to_ptr_tables(block_table, k_page_ptrs, v_page_ptrs):
+    """
+    Convert block_table (block indices) to direct pointer tables.
+    
+    Args:
+        block_table: (batch_size, max_num_blocks_per_seq), int32, block indices
+        k_page_ptrs: list of K page tensor pointers (int)
+        v_page_ptrs: list of V page tensor pointers (int)
+    
+    Returns:
+        k_ptr_table: (batch_size, max_num_blocks_per_seq), uint64, direct K page pointers
+        v_ptr_table: (batch_size, max_num_blocks_per_seq), uint64, direct V page pointers
+    """
+    import torch
+    
+    batch_size, max_num_blocks = block_table.shape
+    device = block_table.device
+    
+    # Create uint64 pointer table directly on CPU
+    k_ptr_table_cpu = torch.zeros((batch_size, max_num_blocks), dtype=torch.uint64)
+    v_ptr_table_cpu = torch.zeros((batch_size, max_num_blocks), dtype=torch.uint64)
+    
+    # Fill in pointer values
+    block_table_cpu = block_table.cpu()
+    for batch_idx in range(batch_size):
+        for block_idx in range(max_num_blocks):
+            page_idx = block_table_cpu[batch_idx, block_idx].item()
+            if page_idx >= 0 and page_idx < len(k_page_ptrs):
+                k_ptr_table_cpu[batch_idx, block_idx] = k_page_ptrs[page_idx]
+                v_ptr_table_cpu[batch_idx, block_idx] = v_page_ptrs[page_idx]
+    
+    # Move to GPU
+    k_ptr_table = k_ptr_table_cpu.to(device)
+    v_ptr_table = v_ptr_table_cpu.to(device)
+    
+    return k_ptr_table, v_ptr_table
+
+
+def flexi_direct_flash_attn_varlen_func(
+    q,
+    k_meta,
+    v_meta,
+    num_blocks,
+    k_ptr_table,
+    v_ptr_table,
+    max_seqlen_q,
+    cu_seqlens_q,
+    max_seqlen_k,
+    cu_seqlens_k=None,
+    seqused_k=None,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: Optional[List[int]] = None,
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+    return_softmax_lse=False,
+    out=None,
+):
+    """
+    Direct pointer table version of flexi_flash_attn_varlen_func.
+    Uses k_ptr_table and v_ptr_table directly instead of block_table + page_ptrs lookup.
+    This eliminates one level of indirection for better performance.
+    
+    Arguments:
+        q: (total_q, nheads, headdim), where total_q = total number of query tokens in the batch.
+        k_meta: (page_block_size, nheads_k, headdim), representative tensor for K shape/stride
+        v_meta: (page_block_size, nheads_k, headdim), representative tensor for V shape/stride
+        num_blocks: int, total number of KV cache pages
+        k_ptr_table: (batch_size, max_num_blocks_per_seq), int64, direct K page pointers
+        v_ptr_table: (batch_size, max_num_blocks_per_seq), int64, direct V page pointers
+        cu_seqlens_q: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+           of the sequences in the batch, used to index into q.
+        cu_seqlens_k: (batch_size + 1,), dtype torch.int32. The cumulative sequence lengths
+           of the sequences in the batch, used to index into kv.
+        max_seqlen_q: int. Maximum query sequence length in the batch.
+        max_seqlen_k: int. Maximum key sequence length in the batch.
+        dropout_p: float. Dropout probability.
+        softmax_scale: float. The scaling of QK^T before applying softmax.
+            Default to 1 / sqrt(headdim).
+        causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
+        window_size: (left, right). If not (-1, -1), implements sliding window local attention.
+        softcap: float. Anything > 0 activates softcapping attention.
+        alibi_slopes: (nheads,) or (batch_size, nheads), fp32. A bias of
+            (-alibi_slope * |i + seqlen_k - seqlen_q - j|)
+            is added to the attention score of query i and key j.
+        deterministic: bool. Whether to use the deterministic implementation of the backward pass,
+            which is slightly slower and uses more memory. The forward pass is always deterministic.
+        return_attn_probs: bool. Whether to return the attention probabilities. This option is for
+           testing only. The returned probabilities are not guaranteed to be correct
+           (they might not have the right scaling).
+    Return:
+        out: (total_q, nheads, headdim).
+        softmax_lse [optional, if return_softmax_lse=True]: (nheads, total_q_seqlen). The
+            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
+            normalization factor).
+    """
+    assert cu_seqlens_k is not None or seqused_k is not None, \
+        "cu_seqlens_k or seqused_k must be provided"
+    assert cu_seqlens_k is None or seqused_k is None, \
+        "cu_seqlens_k and seqused_k cannot be provided at the same time"
+    assert k_ptr_table.dtype == torch.uint64, "k_ptr_table must be uint64"
+    assert v_ptr_table.dtype == torch.uint64, "v_ptr_table must be uint64"
+    assert k_ptr_table.shape == v_ptr_table.shape, "k_ptr_table and v_ptr_table must have same shape"
+    
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    
+    # custom op does not support non-tuple input
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    
+    q = maybe_contiguous(q)
+    k_ptr_table = maybe_contiguous(k_ptr_table)
+    v_ptr_table = maybe_contiguous(v_ptr_table)
+    
+    # Use a single representative page tensor to carry stride/shape metadata.
+    dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
+    
+    out, softmax_lse = torch.ops._vllm_fa2_C.flexi_direct_varlen_fwd(
+        q,
+        k_meta,
+        v_meta,
+        num_blocks,
+        k_ptr_table,
+        v_ptr_table,
+        out,
+        cu_seqlens_q,
+        dummy_cu_seqlens_k if cu_seqlens_k is None else cu_seqlens_k,
+        seqused_k,
+        None,  # leftpad_k
+        alibi_slopes,
+        max_seqlen_q,
+        max_seqlen_k,
+        dropout_p,
+        softmax_scale,
+        False,  # zero_tensors
+        causal,
+        real_window_size[0],
+        real_window_size[1],
+        softcap,
+        return_attn_probs,
+        None,  # generator
+    )
+    
+    return out if not return_softmax_lse else (out, softmax_lse)
+

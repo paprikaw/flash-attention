@@ -192,8 +192,11 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
                       int window_size_left,
                       int window_size_right,
                       const float softcap,
-                      void** k_ptrs_dev_cached,
-                      void** v_ptrs_dev_cached,
+                      bool use_direct_ptr_table,
+                      const uintptr_t* k_ptr_table=nullptr,
+                      const uintptr_t* v_ptr_table=nullptr,
+                      void** k_ptrs_dev_cached=nullptr,
+                      void** v_ptrs_dev_cached=nullptr,
                       bool seqlenq_ngroups_swapped=false,
                       const bool unpadded_lse=false
                       ) {
@@ -201,7 +204,13 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
     // Reset the parameters
     params = {};
 
-    
+    if (use_direct_ptr_table) {
+        assert(k_ptr_table != nullptr);
+        assert(v_ptr_table != nullptr);
+    } else {
+        assert(k_ptrs_dev_cached != nullptr);
+        assert(v_ptrs_dev_cached != nullptr);
+    }
     // Allocate device memory for the pointers
     // Set the pointers and strides.
     params.q_ptr = q.data_ptr();
@@ -303,6 +312,11 @@ void set_params_flexi_fprop(Flash_fwd_params &params,
 
     params.unpadded_lse = unpadded_lse;
     params.seqlenq_ngroups_swapped = seqlenq_ngroups_swapped;
+    
+    // Initialize direct pointer table parameters to default values
+    params.use_direct_ptr_table = use_direct_ptr_table;
+    params.k_ptr_table = k_ptr_table;
+    params.v_ptr_table = v_ptr_table;
 }
 
 // Prepare and cache KV pointers on GPU for flexi attention
@@ -345,7 +359,7 @@ std::tuple<int64_t, int64_t> prepare_flexi_kv_ptrs(
                v_list.size() * sizeof(void*),
                cudaMemcpyHostToDevice);
     
-    printf("DEBUG: Cached GPU pointers - k_ptrs_dev=%p, v_ptrs_dev=%p\n", k_ptrs_dev, v_ptrs_dev);
+    // printf("DEBUG: Cached GPU pointers - k_ptrs_dev=%p, v_ptrs_dev=%p\n", k_ptrs_dev, v_ptrs_dev);
     
     // Return as int64 to be Python-compatible
     return std::make_tuple(reinterpret_cast<int64_t>(k_ptrs_dev), 
@@ -360,7 +374,7 @@ void free_flexi_kv_ptrs(int64_t k_ptrs_dev, int64_t v_ptrs_dev) {
     if (v_ptrs_dev != 0) {
         cudaFree(reinterpret_cast<void**>(v_ptrs_dev));
     }
-    printf("DEBUG: Freed cached GPU pointers\n");
+    // printf("DEBUG: Freed cached GPU pointers\n");
 }
 
 void set_params_dgrad(Flash_bwd_params &params,
@@ -460,14 +474,27 @@ void run_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split
 }
 
 void run_flexi_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+    assert(params.num_splits >= 0);
     FP16_SWITCH(!params.is_bf16, [&] {
         HEADDIM_SWITCH(params.d, [&] {
             BOOL_SWITCH(params.is_causal, Is_causal, [&] {
                 TORCH_CHECK(params.num_splits > 0 || force_split_kernel, "flexi must use split-kv");
-#ifdef DEBUG_FLEXI
-                printf("DEBUG: run_flexi_mha_fwd: headdim=%d, is_causal=%d, num_splits=%d\n", kHeadDim, Is_causal, params.num_splits);
-#endif
-                run_mha_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
+// #ifdef DEBUG_FLEXI
+//                 printf("DEBUG: run_flexi_mha_fwd: headdim=%d, is_causal=%d, num_splits=%d\n", kHeadDim, Is_causal, params.num_splits);
+// #endif
+                run_mha_flexi_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
+            });
+        });
+    });
+}
+
+void run_direct_flexi_mha_fwd(Flash_fwd_params &params, cudaStream_t stream, bool force_split_kernel=false) {
+    assert(params.num_splits >= 0);
+    FP16_SWITCH(!params.is_bf16, [&] {
+        HEADDIM_SWITCH(params.d, [&] {
+            BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+                TORCH_CHECK(params.num_splits > 0 || force_split_kernel, "flexi_direct must use split-kv");
+                run_mha_direct_flexi_fwd_splitkv_dispatch<elem_type, kHeadDim, Is_causal>(params, stream);
             });
         });
     });
@@ -922,8 +949,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
-    cudaStreamSynchronize(stream);
 #ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] After params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
@@ -984,8 +1011,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 
     if (max_seqlen_k > 0) {
         run_mha_fwd(params, stream, paged_KV);
-        cudaStreamSynchronize(stream);
 #ifdef DEBUG_FLEXI
+        cudaStreamSynchronize(stream);
         auto t_after_kernel = std::chrono::high_resolution_clock::now();
         printf("[Normal BENCHMARK] Kernel execution time: %.3f ms\n", 
                std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
@@ -999,7 +1026,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     auto host = timing_buf.cpu();
     auto data_ptr = host.data_ptr<int64_t>();
     // resolve_cycles, main_cycles, block_count, indirection_cycles
-    printf("[DEBUG_TIMING_NORMAL] resolve: %lld, main: %lld, blocks: %lld",
+    printf("[DEBUG_TIMING_NORMAL] resolve: %lld, main: %lld, blocks: %lld\n",
            static_cast<long long>(data_ptr[0]),
            static_cast<long long>(data_ptr[1]),
            static_cast<long long>(data_ptr[2]));
@@ -1023,8 +1050,8 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
         int64_t lse_size_after[] = {num_heads * max_seqlen_q, batch_size};
         softmax_lse = softmax_lse.reshape(lse_size_before).transpose(1, 2).reshape(lse_size_after);
     }
-    cudaStreamSynchronize(stream);
 #ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
     auto t_end = std::chrono::high_resolution_clock::now();
     printf("[Normal BENCHMARK] Total time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_end - t_start).count());
@@ -1925,7 +1952,7 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 #ifdef DEBUG_FLEXI
     auto t_before_params = std::chrono::high_resolution_clock::now();
-    printf("[BENCHMARK] Before params time: %.3f ms\n", 
+    printf("[FLEXI BENCHMARK] Before params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_params - t_start).count());
 #endif
 
@@ -1984,6 +2011,9 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                      window_size_left,
                      window_size_right,
                      softcap,
+                     false,
+                     nullptr,
+                     nullptr,
                      k_ptrs_dev_ptr,
                      v_ptrs_dev_ptr,
                      seqlenq_ngroups_swapped,
@@ -1993,10 +2023,10 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
-    cudaStreamSynchronize(stream);
 #ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
     auto t_after_params = std::chrono::high_resolution_clock::now();
-    printf("[BENCHMARK] After params time: %.3f ms\n", 
+    printf("[FLEXI BENCHMARK] After params time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
 #endif
     params.total_q = total_q;
@@ -2056,23 +2086,23 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
 
 #ifdef DEBUG_FLEXI
     auto t_before_kernel = std::chrono::high_resolution_clock::now();
-    printf("[BENCHMARK] Pre-kernel setup time: %.3f ms\n", 
+    printf("[FLEXI BENCHMARK] Pre-kernel setup time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_before_kernel - t_after_params).count());
 #endif
 
     if (max_seqlen_k > 0) {
         run_flexi_mha_fwd(params, stream, paged_KV);
-        cudaStreamSynchronize(stream);
-#ifdef DEBUG_FLEXI
-        auto t_after_kernel = std::chrono::high_resolution_clock::now();
-        printf("[BENCHMARK] Kernel execution time: %.3f ms\n", 
-               std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
-#endif
     } else {
         // If seqlen_k == 0, then we have an empty tensor. We need to set the output to 0.
         out.zero_();
         softmax_lse.fill_(std::numeric_limits<float>::infinity());
     }
+#ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
+    auto t_after_kernel = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI BENCHMARK] Kernel execution time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
+#endif
 #ifdef DEBUG_FLEXI_TIMING
     auto host = timing_buf.cpu();
     auto data_ptr = host.data_ptr<int64_t>();
@@ -2083,33 +2113,348 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
            static_cast<long long>(data_ptr[2]));
 #endif
 
+#ifdef DEBUG_FLEXI
+    auto t_before_reshape = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI BENCHMARK] Post-kernel pre-reshape time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_before_reshape - t_after_kernel).count());
+#endif
+
     if (seqlenq_ngroups_swapped) {
+#ifdef DEBUG_FLEXI
+        auto t_reshape_start = std::chrono::high_resolution_clock::now();
+#endif
         int64_t size_before[] = {batch_size, max_seqlen_q, num_heads_k, head_size};
         int64_t size_after[] = {batch_size, num_heads_k * max_seqlen_q, head_size};
         out = out.reshape(size_before).transpose(1, 2);
+#ifdef DEBUG_FLEXI
+        auto t_after_out_transpose = std::chrono::high_resolution_clock::now();
+        printf("[FLEXI BENCHMARK] Out reshape+transpose time: %.3f ms\n", 
+               std::chrono::duration<double, std::milli>(t_after_out_transpose - t_reshape_start).count());
+#endif
         if (out_.has_value()) {
             // NOTE(woosuk): In this case, we should avoid `out.reshape(size_after)` because it causes
             // a redundant clone operation. Instead, we directly copy the result to the `out_` tensor.
             out_.value().view({batch_size, num_heads_k, max_seqlen_q, head_size}).copy_(out);
             out = out_.value();
+#ifdef DEBUG_FLEXI
+            auto t_after_copy = std::chrono::high_resolution_clock::now();
+            printf("[FLEXI BENCHMARK] Out copy_ time: %.3f ms\n", 
+                   std::chrono::duration<double, std::milli>(t_after_copy - t_after_out_transpose).count());
+#endif
         } else {
             out = out.reshape(size_after);
+#ifdef DEBUG_FLEXI
+            printf("[FLEXI BENCHMARK] Out final reshape (no copy) time: %.3f ms\n", 
+                   std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_after_out_transpose).count());
+#endif
         }
         // NOTE(woosuk): The two lines are not needed because out_padded and q_padded are not used.
         // out_padded = out_padded.reshape(size_before).transpose(1, 2).reshape(size_after);
         // q_padded = q_padded.reshape(size_before).transpose(1, 2).reshape(size_after);
+#ifdef DEBUG_FLEXI
+        auto t_before_lse_reshape = std::chrono::high_resolution_clock::now();
+#endif
         int64_t lse_size_before[] = {num_heads, batch_size, max_seqlen_q};
         int64_t lse_size_after[] = {num_heads * max_seqlen_q, batch_size};
         softmax_lse = softmax_lse.reshape(lse_size_before).transpose(1, 2).reshape(lse_size_after);
+#ifdef DEBUG_FLEXI
+        auto t_after_lse_reshape = std::chrono::high_resolution_clock::now();
+        printf("[FLEXI BENCHMARK] LSE reshape time: %.3f ms\n", 
+               std::chrono::duration<double, std::milli>(t_after_lse_reshape - t_before_lse_reshape).count());
+#endif
     }
 
-    cudaStreamSynchronize(stream);
 #ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
     auto t_end = std::chrono::high_resolution_clock::now();
-    printf("[BENCHMARK] Total flexi_mha_varlen_fwd time: %.3f ms\n", 
+    printf("[FLEXI BENCHMARK] Total flexi_mha_varlen_fwd time: %.3f ms\n", 
            std::chrono::duration<double, std::milli>(t_end - t_start).count());
 #endif
 
     return {out, softmax_lse};
 }
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+std::vector<at::Tensor>
+flexi_direct_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size
+               const at::Tensor &k_meta,  // representative tensor for shape/stride
+               const at::Tensor &v_meta,  // representative tensor for shape/stride
+               const int64_t num_blocks,  // number of pages
+               const at::Tensor &k_ptr_table,  // batch_size x max_num_blocks_per_seq, int64 pointers
+               const at::Tensor &v_ptr_table,  // batch_size x max_num_blocks_per_seq, int64 pointers
+               std::optional<at::Tensor> &out_,
+               const at::Tensor &cu_seqlens_q,  // b+1
+               const at::Tensor &cu_seqlens_k,  // b+1
+               std::optional<at::Tensor> &seqused_k,
+               std::optional<const at::Tensor> &leftpad_k_,
+               std::optional<at::Tensor> &alibi_slopes_,
+               int max_seqlen_q,
+               const int max_seqlen_k,
+               const float p_dropout,
+               const float softmax_scale,
+               const bool zero_tensors,
+               bool is_causal,
+               int window_size_left,
+               int window_size_right,
+               const float softcap,
+               const bool return_softmax,
+               std::optional<at::Generator> gen_) {
+#ifdef DEBUG_FLEXI
+    auto t_start = std::chrono::high_resolution_clock::now();
+#endif
+    at::cuda::CUDAGuard device_guard{q.device()};
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
+    bool is_sm8x_min = cc_major >= 8;
+    TORCH_CHECK(is_sm8x_min, "FlashAttention only supports Ampere GPUs or newer.");
+
+    auto q_dtype = q.dtype();
+    TORCH_CHECK(q_dtype == torch::kFloat16 || q_dtype == torch::kBFloat16,
+                "FlashAttention only support fp16 and bf16 data type");
+    TORCH_CHECK(k_meta.dtype() == q_dtype, "query and key must have the same dtype");
+    TORCH_CHECK(v_meta.dtype() == q_dtype, "query and value must have the same dtype");
+    TORCH_CHECK(cu_seqlens_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
+    TORCH_CHECK(cu_seqlens_k.dtype() == torch::kInt32, "cu_seqlens_k must have dtype int32");
+
+    CHECK_DEVICE(q); CHECK_DEVICE(k_meta); CHECK_DEVICE(v_meta);
+    CHECK_DEVICE(cu_seqlens_q); CHECK_DEVICE(cu_seqlens_k);
+    CHECK_DEVICE(k_ptr_table); CHECK_DEVICE(v_ptr_table);
+
+    TORCH_CHECK(k_ptr_table.dtype() == torch::kUInt64, "k_ptr_table must have dtype uint64");
+    TORCH_CHECK(v_ptr_table.dtype() == torch::kUInt64, "v_ptr_table must have dtype uint64");
+    TORCH_CHECK(k_ptr_table.stride(-1) == 1, "k_ptr_table must have contiguous last dimension");
+    TORCH_CHECK(v_ptr_table.stride(-1) == 1, "v_ptr_table must have contiguous last dimension");
+
+    TORCH_CHECK(q.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(k_meta.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    TORCH_CHECK(v_meta.stride(-1) == 1, "Input tensor must have contiguous last dimension");
+    CHECK_CONTIGUOUS(cu_seqlens_q);
+    CHECK_CONTIGUOUS(cu_seqlens_k);
+
+    const auto sizes = q.sizes();
+    const int batch_size = cu_seqlens_q.numel() - 1;
+    int num_heads = sizes[1];
+    const int head_size = sizes[2];
+    const int num_heads_k = k_meta.size(1);
+
+    if (softcap > 0.f) { TORCH_CHECK(p_dropout == 0.f, "Softcapping does not support dropout for now"); }
+
+    const int max_num_blocks_per_seq = k_ptr_table.size(1);
+    const int page_block_size = k_meta.size(0);
+    TORCH_CHECK(num_blocks > 0, "num_blocks must be positive");
+    TORCH_CHECK(page_block_size % 16 == 0, "Paged KV cache block size must be divisible by 16");
+    CHECK_SHAPE(k_ptr_table, batch_size, max_num_blocks_per_seq);
+    CHECK_SHAPE(v_ptr_table, batch_size, max_num_blocks_per_seq);
+
+    if (max_seqlen_q == 1 && !alibi_slopes_.has_value()) { is_causal = false; }
+    if (is_causal) { window_size_right = 0; }
+
+    void *cu_seqlens_q_d = cu_seqlens_q.data_ptr();
+
+    const int seqlenq_ngroups_swapped = max_seqlen_q == 1 && num_heads > num_heads_k && window_size_left < 0 && window_size_right < 0 && p_dropout == 0.f && head_size % 8 == 0 && !alibi_slopes_.has_value();
+    const int ngroups = num_heads / num_heads_k;
+    if (seqlenq_ngroups_swapped) {
+        q = q.reshape({batch_size, num_heads_k, ngroups, head_size}).transpose(1, 2).reshape({batch_size * ngroups, num_heads_k, head_size});
+        max_seqlen_q = ngroups;
+        num_heads = num_heads_k;
+        cu_seqlens_q_d = nullptr;
+    }
+
+    const int total_q = q.sizes()[0];
+
+    TORCH_CHECK(batch_size > 0, "batch size must be positive");
+    TORCH_CHECK(head_size <= 256, "FlashAttention forward only supports head dimension at most 256");
+    TORCH_CHECK(head_size % 8 == 0, "query, key, value, and out_ must have a head_size that is a multiple of 8");
+    TORCH_CHECK(num_heads % num_heads_k == 0, "Number of heads in key/value must divide number of heads in query");
+
+    if (window_size_left >= max_seqlen_k) { window_size_left = -1; }
+    if (window_size_right >= max_seqlen_k) { window_size_right = -1; }
+
+    CHECK_SHAPE(q, total_q, num_heads, head_size);
+    CHECK_SHAPE(k_meta, page_block_size, num_heads_k, head_size);
+    CHECK_SHAPE(v_meta, page_block_size, num_heads_k, head_size);
+    CHECK_SHAPE(cu_seqlens_q, batch_size + 1);
+    CHECK_SHAPE(cu_seqlens_k, batch_size + 1);
+    
+    if (seqused_k.has_value()){
+        auto seqused_k_ = seqused_k.value();
+        TORCH_CHECK(seqused_k_.dtype() == torch::kInt32, "seqused_k must have dtype int32");
+        TORCH_CHECK(seqused_k_.is_cuda(), "seqused_k must be on CUDA device");
+        TORCH_CHECK(seqused_k_.is_contiguous(), "seqused_k must be contiguous");
+        CHECK_SHAPE(seqused_k_, batch_size);
+    }
+
+    at::Tensor out;
+    if (out_.has_value()) {
+        out = out_.value();
+        TORCH_CHECK(out.dtype() == q_dtype, "Output must have the same dtype as inputs");
+        CHECK_DEVICE(out);
+        TORCH_CHECK(out.stride(-1) == 1, "Output tensor must have contiguous last dimension");
+        CHECK_SHAPE(out, sizes[0], sizes[1], head_size);
+        if (seqlenq_ngroups_swapped) {
+            out = torch::empty_like(q);
+        }
+    } else {
+        out = torch::empty_like(q);
+    }
+
+    auto round_multiple = [](int x, int m) { return (x + m - 1) / m * m; };
+    const int head_size_rounded = round_multiple(head_size, 32);
+    const int seqlen_q_rounded = round_multiple(max_seqlen_q, 128);
+    const int seqlen_k_rounded = round_multiple(max_seqlen_k, 128);
+
+    auto opts = q.options();
+    auto softmax_lse = torch::empty({num_heads, total_q}, opts.dtype(at::kFloat));
+    
+    
+    // Convert uint64 tensor data to uintptr_t pointers
+    auto k_table_ptr_dev = reinterpret_cast<const uintptr_t*>(k_ptr_table.data_ptr<uint64_t>());
+    auto v_table_ptr_dev = reinterpret_cast<const uintptr_t*>(v_ptr_table.data_ptr<uint64_t>());
+#ifdef DEBUG_FLEXI
+    auto t_before_params = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] Before params time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_before_params - t_start).count());
+#endif
+    Flash_fwd_params params;
+    set_params_flexi_fprop(params,
+                     batch_size,
+                     max_seqlen_q, max_seqlen_k,
+                     seqlen_q_rounded, seqlen_k_rounded,
+                     num_heads, num_heads_k,
+                     head_size, head_size_rounded,
+                     q, k_meta, v_meta, out,
+                     cu_seqlens_q_d,
+                     cu_seqlens_k.data_ptr(),
+                     seqused_k.has_value() ? seqused_k.value().data_ptr() : nullptr,
+                     return_softmax ? nullptr : nullptr,
+                     softmax_lse.data_ptr(),
+                     p_dropout,
+                     softmax_scale,
+                     window_size_left,
+                     window_size_right,
+                     softcap,
+                     true,
+                     k_table_ptr_dev,
+                     v_table_ptr_dev, 
+                     nullptr,  // k_ptrs_dev_cached
+                     nullptr,  // v_ptrs_dev_cached
+                     seqlenq_ngroups_swapped,
+                     /*unpadded_lse*/true
+                     );
+
+
+#ifdef DEBUG_FLEXI_TIMING
+    auto timing_buf = torch::zeros({3}, opts.dtype(at::kLong));
+    params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
+#endif
+#ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
+    auto t_after_params = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] After params time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_after_params - t_before_params).count());
+#endif
+    params.total_q = total_q;
+
+    // Set direct pointer table mode
+    params.ptr_table_batch_stride = k_ptr_table.stride(0);
+
+    params.k_batch_stride = k_meta.stride(0);
+    params.v_batch_stride = v_meta.stride(0);
+    params.page_block_size = page_block_size;
+        // Keep references to these tensors to extend their lifetime
+    at::Tensor softmax_lse_accum, out_accum;
+    if (leftpad_k_.has_value()) {
+        auto leftpad_k = leftpad_k_.value();
+        TORCH_CHECK(leftpad_k.dtype() == torch::kInt32, "leftpad_k must have dtype int32");
+        CHECK_DEVICE(leftpad_k);
+        CHECK_CONTIGUOUS(leftpad_k);
+        CHECK_SHAPE(leftpad_k, batch_size);
+        params.leftpad_k = static_cast<int *>(leftpad_k.data_ptr());
+    }
+
+    set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
+#ifdef DEBUG_FLEXI
+    auto t_before_kernel = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] Pre-kernel setup time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_before_kernel - t_after_params).count());
+#endif
+
+    if (max_seqlen_k > 0) {
+        run_direct_flexi_mha_fwd(params, stream, /*force_split_kernel=*/true);
+    } else {
+        out.zero_();
+        softmax_lse.fill_(std::numeric_limits<float>::infinity());
+    }
+#ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
+    auto t_after_kernel = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] Kernel execution time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_after_kernel - t_before_kernel).count());
+#endif
+    
+#ifdef DEBUG_FLEXI_TIMING
+    auto host = timing_buf.cpu();
+    auto data_ptr = host.data_ptr<int64_t>();
+    // resolve_cycles, main_cycles, block_count, indirection_cycles
+    printf("[DEBUG_TIMING_FLEXI] resolve: %lld, main: %lld, blocks: %lld\n",
+           static_cast<long long>(data_ptr[0]),
+           static_cast<long long>(data_ptr[1]),
+           static_cast<long long>(data_ptr[2]));
+#endif
+
+#ifdef DEBUG_FLEXI
+    auto t_before_reshape = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] Post-kernel pre-reshape time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_before_reshape - t_after_kernel).count());
+#endif
+
+    if (seqlenq_ngroups_swapped) {
+#ifdef DEBUG_FLEXI
+        auto t_reshape_start = std::chrono::high_resolution_clock::now();
+#endif
+        int64_t size_before[] = {batch_size, max_seqlen_q, num_heads_k, head_size};
+        int64_t size_after[] = {batch_size, num_heads_k * max_seqlen_q, head_size};
+        out = out.reshape(size_before).transpose(1, 2);
+#ifdef DEBUG_FLEXI
+        auto t_after_out_transpose = std::chrono::high_resolution_clock::now();
+        printf("[FLEXI DIRECT BENCHMARK] Out reshape+transpose time: %.3f ms\n", 
+               std::chrono::duration<double, std::milli>(t_after_out_transpose - t_reshape_start).count());
+#endif
+        if (out_.has_value()) {
+            out_.value().view({batch_size, num_heads_k, max_seqlen_q, head_size}).copy_(out);
+            out = out_.value();
+#ifdef DEBUG_FLEXI
+            auto t_after_copy = std::chrono::high_resolution_clock::now();
+            printf("[FLEXI DIRECT BENCHMARK] Out copy_ time: %.3f ms\n", 
+                   std::chrono::duration<double, std::milli>(t_after_copy - t_after_out_transpose).count());
+#endif
+        } else {
+            out = out.reshape(size_after);
+#ifdef DEBUG_FLEXI
+            printf("[FLEXI DIRECT BENCHMARK] Out final reshape (no copy) time: %.3f ms\n", 
+                   std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t_after_out_transpose).count());
+#endif
+        }
+#ifdef DEBUG_FLEXI
+        auto t_before_lse_reshape = std::chrono::high_resolution_clock::now();
+#endif
+        int64_t lse_size_before[] = {num_heads, batch_size, max_seqlen_q};
+        int64_t lse_size_after[] = {num_heads * max_seqlen_q, batch_size};
+        softmax_lse = softmax_lse.reshape(lse_size_before).transpose(1, 2).reshape(lse_size_after);
+#ifdef DEBUG_FLEXI
+        auto t_after_lse_reshape = std::chrono::high_resolution_clock::now();
+        printf("[FLEXI DIRECT BENCHMARK] LSE reshape time: %.3f ms\n", 
+               std::chrono::duration<double, std::milli>(t_after_lse_reshape - t_before_lse_reshape).count());
+#endif
+    }
+#ifdef DEBUG_FLEXI
+    cudaStreamSynchronize(stream);
+    auto t_end = std::chrono::high_resolution_clock::now();
+    printf("[FLEXI DIRECT BENCHMARK] Total flexi_direct_mha_varlen_fwd time: %.3f ms\n", 
+           std::chrono::duration<double, std::milli>(t_end - t_start).count());
+#endif
+    return {out, softmax_lse};
+}
+
 } // namespace FLASH_NAMESPACE

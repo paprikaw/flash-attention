@@ -38,6 +38,31 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                const bool return_softmax,
                std::optional<at::Generator> gen_);
 
+std::vector<at::Tensor>
+flexi_direct_mha_varlen_fwd(at::Tensor &q,
+               const at::Tensor &k_meta,
+               const at::Tensor &v_meta,
+               const int64_t num_blocks,
+               const at::Tensor &k_ptr_table,
+               const at::Tensor &v_ptr_table,
+               std::optional<at::Tensor> &out_,
+               const at::Tensor &cu_seqlens_q,
+               const at::Tensor &cu_seqlens_k,
+               std::optional<at::Tensor> &seqused_k,
+               std::optional<const at::Tensor> &leftpad_k_,
+               std::optional<at::Tensor> &alibi_slopes_,
+               int max_seqlen_q,
+               const int max_seqlen_k,
+               const float p_dropout,
+               const float softmax_scale,
+               const bool zero_tensors,
+               bool is_causal,
+               int window_size_left,
+               int window_size_right,
+               const float softcap,
+               const bool return_softmax,
+               std::optional<at::Generator> gen_);
+
 
 std::vector<at::Tensor>
 flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \sum_{i=0}^{b} s_i
@@ -154,6 +179,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
             "bool is_causal, int window_size_left, int window_size_right, float softcap, bool return_softmax, "
             "Generator? gen, int! cached_k_ptrs, int! cached_v_ptrs) -> Tensor[]");
     ops.impl("flexi_varlen_fwd", torch::kCUDA, make_pytorch_shim(&flexi_mha_varlen_fwd));
+
+    ops.def("flexi_direct_varlen_fwd(Tensor! q, Tensor k_meta, Tensor v_meta, int num_blocks, "
+            "Tensor k_ptr_table, Tensor v_ptr_table, Tensor!? out, Tensor cu_seqlens_q, "
+            "Tensor cu_seqlens_k, Tensor? seqused_k, Tensor? leftpad_k, Tensor? alibi_slopes, "
+            "int max_seqlen_q, int max_seqlen_k, float p_dropout, float softmax_scale, bool zero_tensors, "
+            "bool is_causal, int window_size_left, int window_size_right, float softcap, bool return_softmax, "
+            "Generator? gen) -> Tensor[]");
+    ops.impl("flexi_direct_varlen_fwd", torch::kCUDA, make_pytorch_shim(&flexi_direct_mha_varlen_fwd));
 
     ops.def("fwd_kvcache(Tensor! q, Tensor kcache, Tensor vcache, Tensor? k, Tensor? v, Tensor? seqlens_k, "
             "Tensor? rotary_cos, Tensor? rotary_sin, Tensor? cache_batch_idx, Tensor? leftpad_k, Tensor? block_table, "

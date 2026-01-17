@@ -108,6 +108,12 @@ struct Flash_fwd_params : public Qkv_params {
     void ** __restrict__ k_page_ptrs;
     void ** __restrict__ v_page_ptrs;
 
+    // Direct pointer tables for flexi_direct mode (eliminates block_table lookup)
+    const uintptr_t* __restrict__ k_ptr_table;
+    const uintptr_t* __restrict__ v_ptr_table;
+    index_t ptr_table_batch_stride;  // stride to next batch in ptr_table
+    bool use_direct_ptr_table;  // flag to enable direct pointer table mode
+
     // Optional debug timing buffer (length >= 4) for debug timing; only used when DEBUG_FLEXI_TIMING is defined.
     uint64_t* debug_timing;
 
@@ -147,6 +153,8 @@ struct Flash_fwd_params : public Qkv_params {
 
     bool unpadded_lse;  // For varlen paths: LSE is in [nheads, total_seqlen_q] format instead of [b, nheads, seqlen_q].
     bool seqlenq_ngroups_swapped;  // q has been transposed from (b, 1, (nheads_kv ngroups), d) to (b, ngroups, nheads_kv, d).
+
+    
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -195,6 +203,8 @@ struct Flash_bwd_params : public Flash_fwd_params {
 
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_(Flash_fwd_params &params, cudaStream_t stream);
 template<typename T, int Headdim, bool Is_causal> void run_mha_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+template<typename T, int Headdim, bool Is_causal> void run_mha_flexi_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
+template<typename T, int Headdim, bool Is_causal> void run_mha_direct_flexi_fwd_splitkv_dispatch(Flash_fwd_params &params, cudaStream_t stream);
 
 template<typename T, int Headdim, bool Is_causal> void run_mha_bwd_(Flash_bwd_params &params, cudaStream_t stream);
 
