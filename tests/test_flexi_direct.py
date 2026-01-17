@@ -233,48 +233,60 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
     k_ptr_table, v_ptr_table = block_table_to_ptr_tables(block_table, k_page_ptrs, v_page_ptrs)
 
     torch.cuda.synchronize()
+    
+    num_warmup = 5
+    num_benchmark = 10
+    
     # Warmup direct
-    for _ in range(3):
+    for _ in range(num_warmup):
         _ = flexi_direct_flash_attn_varlen_func(
             q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
             k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
             max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
             seqused_k=seqused_k, causal=False,
         )
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    output1 = flexi_direct_flash_attn_varlen_func(
-        q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
-        k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
-        max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
-        seqused_k=seqused_k, causal=False,
-    )
+    
+    # Benchmark direct
+    direct_times = []
+    for _ in range(num_benchmark):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        output1 = flexi_direct_flash_attn_varlen_func(
+            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+            k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
+            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
+            seqused_k=seqused_k, causal=False,
+        )
+        torch.cuda.synchronize()
+        direct_times.append(time.perf_counter() - start)
+    direct_time = sum(direct_times) / len(direct_times)  # Use average to exclude outliers
 
-    torch.cuda.synchronize()
-    direct_time = (time.perf_counter() - start)
-
-    # Warmup
-    for _ in range(3):
+    # Warmup original
+    for _ in range(num_warmup):
         _ = flexi_flash_attn_varlen_func(
             q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
             max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
             seqused_k=seqused_k, causal=False, block_table=block_table,
             cached_k_ptrs=cached_k_ptrs, cached_v_ptrs=cached_v_ptrs,
         )
+    
     # Benchmark original
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    output2 = flexi_flash_attn_varlen_func(
-        q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
-        max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
-        seqused_k=seqused_k, causal=False, block_table=block_table,
-        cached_k_ptrs=cached_k_ptrs, cached_v_ptrs=cached_v_ptrs,
-    )
-    torch.cuda.synchronize()
-    original_time = (time.perf_counter() - start)
+    original_times = []
+    for _ in range(num_benchmark):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        output2 = flexi_flash_attn_varlen_func(
+            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
+            seqused_k=seqused_k, causal=False, block_table=block_table,
+            cached_k_ptrs=cached_k_ptrs, cached_v_ptrs=cached_v_ptrs,
+        )
+        torch.cuda.synchronize()
+        original_times.append(time.perf_counter() - start)
+    original_time = sum(original_times) / len(original_times)
 
     # Warmup regular flash attention
-    for _ in range(3):
+    for _ in range(num_warmup):
         _ = flash_attn_varlen_func(
             q=q, k=k_cache_packed, v=v_cache_packed,
             cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
@@ -283,16 +295,19 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
         )
     
     # Benchmark regular flash attention
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    output3 = flash_attn_varlen_func(
-        q=q, k=k_cache_packed, v=v_cache_packed,
-        cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
-        max_seqlen_q=seqlen_q, max_seqlen_k=seqlen_k,
-        causal=False, block_table=block_table,
-    )
-    torch.cuda.synchronize()
-    regular_time = (time.perf_counter() - start)
+    regular_times = []
+    for _ in range(num_benchmark):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        output3 = flash_attn_varlen_func(
+            q=q, k=k_cache_packed, v=v_cache_packed,
+            cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
+            max_seqlen_q=seqlen_q, max_seqlen_k=seqlen_k,
+            causal=False, block_table=block_table,
+        )
+        torch.cuda.synchronize()
+        regular_times.append(time.perf_counter() - start)
+    regular_time = sum(regular_times) / len(regular_times)
 
     speedup_direct_vs_flexi = original_time / direct_time
     speedup_direct_vs_regular = regular_time / direct_time
