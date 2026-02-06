@@ -5,5 +5,9 @@ export CMAKE_PREFIX_PATH="/home/bxb1/vllm_workbench/flash-attention/.venv:${CMAK
 export FLASH_ATTN_HEAD_SIZE=128
 export FLASHATTENTION_ONLY_BF16=1
 export FLASH_ATTN_DISABLE_FA3=TRUE
+rm -rf build/
+mkdir build
+rm -rf vllm_flash_attn/*.so
+rm -rf csrc/flash_attn/*.so
 ccache -z
 uv pip install -v --no-build-isolation -e   . > uv_build.log 2>&1

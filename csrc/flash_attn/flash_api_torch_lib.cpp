@@ -195,7 +195,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
     ops.impl("fwd_kvcache", torch::kCUDA, make_pytorch_shim(&mha_fwd_kvcache));
 
     ops.def("prepare_flexi_kv_ptrs(Tensor[] k_list, Tensor[] v_list) -> (int!, int!)");
-    ops.impl("prepare_flexi_kv_ptrs", torch::kCUDA, &prepare_flexi_kv_ptrs);
+    // Note: prepare_flexi_kv_ptrs impl is registered in CatchAll block below
+    // because Tensor[] dispatch doesn't work correctly with torch::kCUDA
+    
     // No return value; schema still needs the arrow. Implementation registered in a CatchAll block below.
     ops.def("free_flexi_kv_ptrs(int! k_ptrs_dev, int! v_ptrs_dev) -> ()");
 
@@ -222,8 +224,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 }
 
-// Catch-all implementation for the pointer free routine (no tensor inputs).
+// Catch-all implementation for functions that don't dispatch on tensor device.
 TORCH_LIBRARY_IMPL(TORCH_EXTENSION_NAME, CatchAll, m) {
+    m.impl("prepare_flexi_kv_ptrs", &prepare_flexi_kv_ptrs);
     m.impl("free_flexi_kv_ptrs", &free_flexi_kv_ptrs);
 }
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME);

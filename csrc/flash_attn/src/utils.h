@@ -463,16 +463,16 @@ typename Kernel_traits::Element* flexi_direct_resolve_thread_kv_pair_offset(
 // This saves redundant computation of virtual_page_idx, page_offset, col_offset
 // which are shared between K and V for the same n_block
 // NOTE: k_ptr_table and v_ptr_table should already be offset to the current batch
+// Returns cute::tuple<Element*, Element*> to avoid stack spill from reference parameters
 template <typename Kernel_traits>
 __forceinline__ __device__
-void flexi_direct_resolve_kv_pair_offset(
+cute::tuple<typename Kernel_traits::Element*, typename Kernel_traits::Element*>
+flexi_direct_resolve_kv_pair_offset(
     const int tidx, const int n_block, const int page_block_size,
     const uintptr_t* __restrict__ k_ptr_table,
     const uintptr_t* __restrict__ v_ptr_table,
     const int k_row_stride, const int v_row_stride,
-    typename Kernel_traits::Element* &k_ptr_out,
-    typename Kernel_traits::Element* &v_ptr_out,
-    std::optional<int> partial_block_size = std::nullopt
+    const int partial_block_size = -1  // Use -1 to indicate no partial block (avoids std::optional overhead)
 ) {
     constexpr int kGmemThreadsPerRow = Kernel_traits::kGmemThreadsPerRow;
     constexpr int kGmemRowsPerThread = Kernel_traits::kGmemRowsPerThread;
@@ -483,12 +483,11 @@ void flexi_direct_resolve_kv_pair_offset(
     const int64_t col_offset = tidx % kGmemThreadsPerRow * kGmemElemsPerLoad;
     int64_t block_row_offset = tidx / kGmemThreadsPerRow * kGmemRowsPerThread;
 
-    if (partial_block_size) {
-        auto final_row_offset = std::max(*partial_block_size - 1, 0);
-        auto final_thread_row_offset = 
+    if (partial_block_size >= 0) {
+        const int final_row_offset = partial_block_size > 0 ? partial_block_size - 1 : 0;
+        const int64_t final_thread_row_offset = 
           ceil_div(final_row_offset, kGmemRowsPerThread) * kGmemRowsPerThread;
-        block_row_offset = std::min(
-            block_row_offset, int64_t(final_thread_row_offset));
+        block_row_offset = std::min(block_row_offset, final_thread_row_offset);
     }
 
     const int64_t global_row_offset = block_row_offset + n_block * kBlockN;
@@ -502,8 +501,10 @@ void flexi_direct_resolve_kv_pair_offset(
     const uintptr_t v_base_addr = __ldg(v_ptr_table + virtual_page_idx);
     
     // Compute final addresses using shared col_offset and page_offset
-    k_ptr_out = reinterpret_cast<Element*>(k_base_addr) + page_offset * k_row_stride + col_offset;
-    v_ptr_out = reinterpret_cast<Element*>(v_base_addr) + page_offset * v_row_stride + col_offset;
+    Element* k_ptr = reinterpret_cast<Element*>(k_base_addr) + page_offset * k_row_stride + col_offset;
+    Element* v_ptr = reinterpret_cast<Element*>(v_base_addr) + page_offset * v_row_stride + col_offset;
+    
+    return cute::make_tuple(k_ptr, v_ptr);
 }
 
 // ////////////////////////////////////////////////////////////////////////////////////////////////////

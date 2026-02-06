@@ -177,19 +177,18 @@ def test_flexi_direct_correctness(batch_size, seqlen_q, seqlen_k, num_heads, hea
           f"num_heads={num_heads}, head_dim={head_dim}, causal={causal}, dtype={dtype}")
 
 
-@pytest.mark.parametrize("batch_size", [100])
-@pytest.mark.parametrize("seqlen_q", [100])
-@pytest.mark.parametrize("seqlen_k", [2000])
-@pytest.mark.parametrize("num_heads", [8])
+@pytest.mark.parametrize("batch_size", [32])
+@pytest.mark.parametrize("seqlen_q", [512])
+@pytest.mark.parametrize("seqlen_k", [2048])
+@pytest.mark.parametrize("num_heads,num_heads_k", [(8, 8)])
 @pytest.mark.parametrize("head_dim", [128])
 @pytest.mark.parametrize("dtype", DTYPES)
-def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, head_dim, dtype):
+def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, num_heads_k, head_dim, dtype):
     """Benchmark flexi_direct vs original flexi."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
     
     device = "cuda"
-    num_heads_k = num_heads
     block_size = 16
     kBlockN = 64  # Flash attention block size
     
@@ -237,30 +236,6 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
     num_warmup = 5
     num_benchmark = 10
     
-    # Warmup direct
-    for _ in range(num_warmup):
-        _ = flexi_direct_flash_attn_varlen_func(
-            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
-            k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
-            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
-            seqused_k=seqused_k, causal=False,
-        )
-    
-    # Benchmark direct
-    direct_times = []
-    for _ in range(num_benchmark):
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        output1 = flexi_direct_flash_attn_varlen_func(
-            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
-            k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
-            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
-            seqused_k=seqused_k, causal=False,
-        )
-        torch.cuda.synchronize()
-        direct_times.append(time.perf_counter() - start)
-    direct_time = sum(direct_times) / len(direct_times)  # Use average to exclude outliers
-
     # Warmup original
     for _ in range(num_warmup):
         _ = flexi_flash_attn_varlen_func(
@@ -308,6 +283,29 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
         torch.cuda.synchronize()
         regular_times.append(time.perf_counter() - start)
     regular_time = sum(regular_times) / len(regular_times)
+    for _ in range(num_warmup):
+        _ = flexi_direct_flash_attn_varlen_func(
+            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+            k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
+            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
+            seqused_k=seqused_k, causal=False,
+        )
+    
+    # Benchmark direct
+    direct_times = []
+    for _ in range(num_benchmark):
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        output1 = flexi_direct_flash_attn_varlen_func(
+            q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+            k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
+            max_seqlen_q=seqlen_q, cu_seqlens_q=cu_seqlens_q, max_seqlen_k=seqlen_k,
+            seqused_k=seqused_k, causal=False,
+        )
+        torch.cuda.synchronize()
+        direct_times.append(time.perf_counter() - start)
+    direct_time = sum(direct_times) / len(direct_times)  # Use average to exclude outliers
+
 
     speedup_direct_vs_flexi = original_time / direct_time
     speedup_direct_vs_regular = regular_time / direct_time
@@ -319,6 +317,11 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
     print(f"  Original Flexi: {original_time*1000:.3f} ms")
     print(f"  Direct Flexi:   {direct_time*1000:.3f} ms")
     print(f"  ---")
+    print(f"  All times (ms):")
+    print(f"    Direct:   min={min(direct_times)*1000:.3f}, max={max(direct_times)*1000:.3f}")
+    print(f"    Original: min={min(original_times)*1000:.3f}, max={max(original_times)*1000:.3f}")
+    print(f"    Regular:  min={min(regular_times)*1000:.3f}, max={max(regular_times)*1000:.3f}")
+    print(f"  ---")
     print(f"  Direct vs Original Flexi speedup: {speedup_direct_vs_flexi:.2f}x")
     print(f"  Direct vs Regular speedup:        {speedup_direct_vs_regular:.2f}x")
     print(f"  Flexi vs Regular speedup:         {speedup_flexi_vs_regular:.2f}x")
@@ -328,8 +331,3 @@ def test_flexi_direct_performance(batch_size, seqlen_q, seqlen_k, num_heads, hea
     f"{torch.max(torch.abs(output1 - output2))}"
     torch.testing.assert_close(output1, output3, atol=2e-2, rtol=1e-2), \
     f"{torch.max(torch.abs(output1 - output3))}"
-    # Cleanup
-    free_flexi_kv_ptrs(cached_k_ptrs, cached_v_ptrs)
-    
-    # Assert some speedup (should be at least a small improvement)
-    # assert speedup > 0.95, f"Direct version should not be slower: speedup={speedup}"

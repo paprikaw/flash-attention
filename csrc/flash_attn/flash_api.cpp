@@ -946,7 +946,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
                      seqlenq_ngroups_swapped,
                      /*unpadded_lse*/true);
 #ifdef DEBUG_FLEXI_TIMING
-    at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
+    at::Tensor timing_buf = torch::zeros({6}, opts.dtype(at::kLong));
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
 #ifdef DEBUG_FLEXI
@@ -1025,11 +1025,15 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
 #ifdef DEBUG_FLEXI_TIMING
     auto host = timing_buf.cpu();
     auto data_ptr = host.data_ptr<int64_t>();
-    // resolve_cycles, main_cycles, block_count, indirection_cycles
-    printf("[DEBUG_TIMING_NORMAL] resolve: %lld, main: %lld, blocks: %lld\n",
+    // [0]=resolve_t0, [1]=main_t0, [2]=blocks, [3]=resolve_all, [4]=main_all, [5]=thread_count
+    printf("[DEBUG_TIMING_NORMAL] resolve_t0: %lld, main_t0: %lld, blocks: %lld\n",
            static_cast<long long>(data_ptr[0]),
            static_cast<long long>(data_ptr[1]),
            static_cast<long long>(data_ptr[2]));
+    printf("[DEBUG_TIMING_NORMAL] resolve_all: %lld, main_all: %lld, threads: %lld\n",
+           static_cast<long long>(data_ptr[3]),
+           static_cast<long long>(data_ptr[4]),
+           static_cast<long long>(data_ptr[5]));
 #endif
     if (seqlenq_ngroups_swapped) {
         int64_t size_before[] = {batch_size, max_seqlen_q, num_heads_k, head_size};
@@ -2020,7 +2024,8 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
                      /*unpadded_lse*/true
                      );
 #ifdef DEBUG_FLEXI_TIMING
-    at::Tensor timing_buf = torch::zeros({4}, opts.dtype(at::kLong));
+    // Buffer: [0]=resolve_t0, [1]=main_t0, [2]=blocks, [3]=resolve_all, [4]=main_all, [5]=thread_count
+    at::Tensor timing_buf = torch::zeros({6}, opts.dtype(at::kLong));
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
 #ifdef DEBUG_FLEXI
@@ -2106,11 +2111,15 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
 #ifdef DEBUG_FLEXI_TIMING
     auto host = timing_buf.cpu();
     auto data_ptr = host.data_ptr<int64_t>();
-    // resolve_cycles, main_cycles, block_count, indirection_cycles
-    printf("[DEBUG_TIMING_FLEXI] resolve: %lld, main: %lld, blocks: %lld\n",
+    // [0]=resolve_t0, [1]=main_t0, [2]=blocks, [3]=resolve_all, [4]=main_all, [5]=thread_count
+    printf("[DEBUG_TIMING_FLEXI] resolve_t0: %lld, main_t0: %lld, blocks: %lld\n",
            static_cast<long long>(data_ptr[0]),
            static_cast<long long>(data_ptr[1]),
            static_cast<long long>(data_ptr[2]));
+    printf("[DEBUG_TIMING_FLEXI] resolve_all: %lld, main_all: %lld, threads: %lld\n",
+           static_cast<long long>(data_ptr[3]),
+           static_cast<long long>(data_ptr[4]),
+           static_cast<long long>(data_ptr[5]));
 #endif
 
 #ifdef DEBUG_FLEXI
@@ -2345,7 +2354,8 @@ flexi_direct_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size
 
 
 #ifdef DEBUG_FLEXI_TIMING
-    auto timing_buf = torch::zeros({3}, opts.dtype(at::kLong));
+    // Buffer: [0]=resolve_t0, [1]=main_t0, [2]=blocks, [3]=resolve_all, [4]=main_all, [5]=thread_count
+    auto timing_buf = torch::zeros({6}, opts.dtype(at::kLong));
     params.debug_timing = reinterpret_cast<uint64_t*>(timing_buf.data_ptr<int64_t>());
 #endif
 #ifdef DEBUG_FLEXI
@@ -2396,11 +2406,15 @@ flexi_direct_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size
 #ifdef DEBUG_FLEXI_TIMING
     auto host = timing_buf.cpu();
     auto data_ptr = host.data_ptr<int64_t>();
-    // resolve_cycles, main_cycles, block_count, indirection_cycles
-    printf("[DEBUG_TIMING_FLEXI] resolve: %lld, main: %lld, blocks: %lld\n",
+    // [0]=resolve_t0, [1]=main_t0, [2]=blocks, [3]=resolve_all, [4]=main_all, [5]=thread_count
+    printf("[DEBUG_TIMING_FLEXI_DIRECT] resolve_t0: %lld, main_t0: %lld, blocks: %lld\n",
            static_cast<long long>(data_ptr[0]),
            static_cast<long long>(data_ptr[1]),
            static_cast<long long>(data_ptr[2]));
+    printf("[DEBUG_TIMING_FLEXI_DIRECT] resolve_all: %lld, main_all: %lld, threads: %lld\n",
+           static_cast<long long>(data_ptr[3]),
+           static_cast<long long>(data_ptr[4]),
+           static_cast<long long>(data_ptr[5]));
 #endif
 
 #ifdef DEBUG_FLEXI
