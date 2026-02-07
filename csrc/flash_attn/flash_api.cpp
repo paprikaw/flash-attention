@@ -2047,17 +2047,13 @@ flexi_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q
     params.page_block_size = page_block_size;
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
-    // DISABLED split-k for debugging
-    // if (seqlenq_ngroups_swapped) {
-    //     // printf("DEBUG: flexi_mha_varlen_fwd: using split-k for decoding optimization\n");
-    //     // Only apply split-k for decoding
-    //     std::tie(softmax_lse_accum, out_accum) =
-    //         set_params_splitkv(params, batch_size, num_heads, head_size,
-    //                            max_seqlen_k, max_seqlen_q, head_size_rounded,
-    //                            p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
-    // } else {
-    //     // printf("DEBUG: flexi_mha_varlen_fwd: not using split-k for decoding optimization\n");
-    // }
+    if (seqlenq_ngroups_swapped) {
+        // Only apply split-k for decoding
+        std::tie(softmax_lse_accum, out_accum) =
+            set_params_splitkv(params, batch_size, num_heads, head_size,
+                               max_seqlen_k, max_seqlen_q, head_size_rounded,
+                               p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
+    }
 
     if (leftpad_k_.has_value()) {
         auto leftpad_k = leftpad_k_.value();
@@ -2372,8 +2368,16 @@ flexi_direct_mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size
     params.k_batch_stride = k_meta.stride(0);
     params.v_batch_stride = v_meta.stride(0);
     params.page_block_size = page_block_size;
-        // Keep references to these tensors to extend their lifetime
+    // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
+    if (seqlenq_ngroups_swapped) {
+        // Only apply split-k for decoding
+        std::tie(softmax_lse_accum, out_accum) =
+            set_params_splitkv(params, batch_size, num_heads, head_size,
+                               max_seqlen_k, max_seqlen_q, head_size_rounded,
+                               p_dropout, /*num_splits*/ 0, get_num_sm(get_current_device()), opts);
+    }
+
     if (leftpad_k_.has_value()) {
         auto leftpad_k = leftpad_k_.value();
         TORCH_CHECK(leftpad_k.dtype() == torch::kInt32, "leftpad_k must have dtype int32");
