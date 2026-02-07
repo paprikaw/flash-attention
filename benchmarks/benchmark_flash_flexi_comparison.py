@@ -151,7 +151,8 @@ def benchmark_kernel(func, num_warmup: int, num_benchmark: int, **kwargs) -> Tup
     return mean_time, min(times), max(times)
 
 
-def run_benchmark(config: BenchmarkConfig, device: str = "cuda", verbose: bool = True) -> BenchmarkResult:
+def run_benchmark(config: BenchmarkConfig, device: str = "cuda", verbose: bool = True,
+                  global_warmup_done: bool = False) -> BenchmarkResult:
     """Run benchmark for all three kernel variants."""
     
     kBlockN = 64  # Flash attention block size
@@ -200,6 +201,49 @@ def run_benchmark(config: BenchmarkConfig, device: str = "cuda", verbose: bool =
     k_ptr_table, v_ptr_table = block_table_to_ptr_tables(block_table, k_page_ptrs, v_page_ptrs)
     
     torch.cuda.synchronize()
+    
+    # ============ Global Warmup Phase ============
+    # If this is the first run, do extra warmup for all kernels to eliminate
+    # Python/PyTorch/CUDA initialization overhead
+    if not global_warmup_done:
+        global_warmup_iterations = 5
+        if verbose:
+            print("  [Global warmup: warming up all kernels...]")
+        
+        # Warmup Flash
+        for _ in range(global_warmup_iterations):
+            _ = flash_attn_varlen_func(
+                q=q, k=k_cache_packed, v=v_cache_packed,
+                cu_seqlens_q=cu_seqlens_q, seqused_k=seqused_k,
+                max_seqlen_q=config.seqlen_q, max_seqlen_k=config.seqlen_k,
+                causal=config.causal, block_table=block_table,
+            )
+        torch.cuda.synchronize()
+        
+        # Warmup Flexi
+        for _ in range(global_warmup_iterations):
+            _ = flexi_flash_attn_varlen_func(
+                q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+                max_seqlen_q=config.seqlen_q, cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_k=config.seqlen_k, seqused_k=seqused_k,
+                causal=config.causal, block_table=block_table,
+                cached_k_ptrs=cached_k_ptrs, cached_v_ptrs=cached_v_ptrs,
+            )
+        torch.cuda.synchronize()
+        
+        # Warmup Flexi Direct
+        for _ in range(global_warmup_iterations):
+            _ = flexi_direct_flash_attn_varlen_func(
+                q=q, k_meta=k_meta, v_meta=v_meta, num_blocks=num_blocks,
+                k_ptr_table=k_ptr_table, v_ptr_table=v_ptr_table,
+                max_seqlen_q=config.seqlen_q, cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_k=config.seqlen_k, seqused_k=seqused_k,
+                causal=config.causal,
+            )
+        torch.cuda.synchronize()
+        
+        if verbose:
+            print("  [Global warmup complete]")
     
     # Calculate theoretical FLOPs
     flops = compute_flops(
@@ -295,7 +339,8 @@ def run_benchmark_suite(configs: List[BenchmarkConfig],
     for i, config in enumerate(configs):
         print(f"\n[{i+1}/{len(configs)}] Running benchmark...")
         try:
-            result = run_benchmark(config, verbose=verbose)
+            # Only do global warmup on the first config
+            result = run_benchmark(config, verbose=verbose, global_warmup_done=(i > 0))
             results.append(result)
         except Exception as e:
             print(f"Error running benchmark: {e}")
@@ -496,7 +541,7 @@ def main():
         return
     
     torch.cuda.manual_seed_all(42)
-    torch.set_default_device("cuda")
+    # torch.set_default_device("cuda")
     
     configs = []
     
